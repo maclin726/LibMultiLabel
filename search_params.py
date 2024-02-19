@@ -5,15 +5,15 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
+import ray.train as ray_train
 import yaml
 from ray import tune
 from ray.tune.schedulers import ASHAScheduler
 
-import numpy as np
-
+from libmultilabel.common_utils import AttributeDict, timer
 from libmultilabel.nn import data_utils
 from libmultilabel.nn.nn_utils import set_seed
-from libmultilabel.common_utils import AttributeDict, Timer
 from torch_trainer import TorchTrainer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(message)s")
@@ -23,13 +23,16 @@ def train_libmultilabel_tune(config, datasets, classes, word_dict):
     """The training function for ray tune.
 
     Args:
-        config (AttributeDict): Config of the experiment.
+        config (dict): Config of the experiment.
         datasets (dict): A dictionary of datasets.
         classes(list): List of class names.
         word_dict(torchtext.vocab.Vocab): A vocab object which maps tokens to indices.
     """
+
+    # ray convert AttributeDict to dict
+    config = AttributeDict(config)
     set_seed(seed=config.seed)
-    config.run_name = tune.get_trial_dir()
+    config.run_name = ray_train.get_context().get_trial_dir()
     logging.info(f"Run name: {config.run_name}")
     config.checkpoint_dir = os.path.join(config.result_dir, config.run_name)
     config.log_path = os.path.join(config.checkpoint_dir, "logs.json")
@@ -39,10 +42,10 @@ def train_libmultilabel_tune(config, datasets, classes, word_dict):
         datasets=datasets,
         classes=classes,
         word_dict=word_dict,
-        search_params=True,
         save_checkpoints=True,
     )
-    trainer.train()
+    val_score = trainer.train()
+    return {f"val_{config.val_metric}": val_score}
 
 
 def load_config_from_file(config_path):
@@ -52,7 +55,7 @@ def load_config_from_file(config_path):
         config_path (str): Path to the config file.
 
     Returns:
-        AttributeDict: Config of the experiment.
+        dict: Config of the experiment.
     """
     with open(config_path) as fp:
         config = yaml.safe_load(fp)
@@ -121,7 +124,7 @@ def init_search_params_spaces(config, parameter_columns, prefix):
 def init_search_algorithm(search_alg, metric=None, mode=None):
     """Specify a search algorithm and you must pip install it first.
     If no search algorithm is specified, the default search algorithm is BasicVariantGenerator.
-    See more details here: https://docs.ray.io/en/master/tune/api_docs/suggestion.html
+    See more details here: https://docs.ray.io/en/latest/tune/api/suggestion.html
 
     Args:
         search_alg (str): One of 'basic_variant', 'bayesopt', or 'optuna'.
@@ -130,26 +133,26 @@ def init_search_algorithm(search_alg, metric=None, mode=None):
     """
     if search_alg == "optuna":
         assert metric and mode, "Metric and mode cannot be None for optuna."
-        from ray.tune.suggest.optuna import OptunaSearch
+        from ray.tune.search.optuna import OptunaSearch
 
         return OptunaSearch(metric=metric, mode=mode)
     elif search_alg == "bayesopt":
         assert metric and mode, "Metric and mode cannot be None for bayesian optimization."
-        from ray.tune.suggest.bayesopt import BayesOptSearch
+        from ray.tune.search.bayesopt import BayesOptSearch
 
         return BayesOptSearch(metric=metric, mode=mode)
     logging.info(f"{search_alg} search is found, run BasicVariantGenerator().")
 
 
-def prepare_retrain_config(best_config, best_log_dir, merge_train_val):
+def prepare_retrain_config(best_config, best_log_dir, retrain):
     """Prepare the configuration for re-training.
 
     Args:
         best_config (AttributeDict): The best hyper-parameter configuration.
         best_log_dir (str): The directory of the best trial of the experiment.
-        merge_train_val (bool): Whether to merge the training and validation data.
+        retrain (bool): Whether to retrain the model with merged training and validation data.
     """
-    if merge_train_val:
+    if retrain:
         best_config.merge_train_val = True
 
         log_path = os.path.join(best_log_dir, "logs.json")
@@ -185,7 +188,7 @@ def load_static_data(config, merge_train_val=False):
         val_data=config.val_file,
         val_size=config.val_size,
         merge_train_val=merge_train_val,
-        tokenize_text="lm_weight" not in config["network_config"],
+        tokenize_text="lm_weight" not in config.network_config,
         remove_no_label_data=config.remove_no_label_data,
     )
     return {
@@ -205,31 +208,32 @@ def load_static_data(config, merge_train_val=False):
     }
 
 
-def retrain_best_model(exp_name, best_config, best_log_dir, merge_train_val):
+def retrain_best_model(exp_name, best_config, best_log_dir, retrain):
     """Re-train the model with the best hyper-parameters.
-    A new model is trained on the combined training and validation data if `merge_train_val` is True.
+    A new model is trained on the combined training and validation data if `retrain` is True.
     If a test set is provided, it will be evaluated by the obtained model.
 
     Args:
         exp_name (str): The directory to save trials generated by ray tune.
-        best_config (AttributeDict): The best hyper-parameter configuration.
+        best_config (dict): The best hyper-parameter configuration.
         best_log_dir (str): The directory of the best trial of the experiment.
-        merge_train_val (bool): Whether to merge the training and validation data.
+        retrain (bool): Whether to retrain the model with merged training and validation data.
     """
+    best_config = AttributeDict(best_config)
     best_config.silent = False
     checkpoint_dir = os.path.join(best_config.result_dir, exp_name, "trial_best_params")
     os.makedirs(checkpoint_dir, exist_ok=True)
-    with open(os.path.join(checkpoint_dir, "params.yml"), "w") as fp:
-        yaml.dump(dict(best_config), fp)
     best_config.run_name = "_".join(exp_name.split("_")[:-1]) + "_best"
     best_config.checkpoint_dir = checkpoint_dir
     best_config.log_path = os.path.join(best_config.checkpoint_dir, "logs.json")
-    prepare_retrain_config(best_config, best_log_dir, merge_train_val)
+    prepare_retrain_config(best_config, best_log_dir, retrain)
     set_seed(seed=best_config.seed)
+    with open(os.path.join(checkpoint_dir, "params.yml"), "w") as fp:
+        yaml.dump(dict(best_config), fp)
 
     data = load_static_data(best_config, merge_train_val=best_config.merge_train_val)
 
-    if merge_train_val:
+    if retrain:
         logging.info(f"Re-training with best config: \n{best_config}")
         trainer = TorchTrainer(config=best_config, **data)
         trainer.train()
@@ -247,21 +251,32 @@ def retrain_best_model(exp_name, best_config, best_log_dir, merge_train_val):
 
     if "test" in data["datasets"]:
         test_results = trainer.test()
-        if merge_train_val:
+        if retrain:
             logging.info(f"Test results after re-training: {test_results}")
         else:
             logging.info(f"Test results of best config: {test_results}")
     logging.info(f"Best model saved to {best_model_path}.")
 
 
+@timer
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config",
         help="Path to configuration file (default: %(default)s). Please specify a config with all arguments in LibMultiLabel/main.py::get_config.",
     )
-    parser.add_argument("--cpu_count", type=int, default=4, help="Number of CPU per trial (default: %(default)s)")
-    parser.add_argument("--gpu_count", type=int, default=1, help="Number of GPU per trial (default: %(default)s)")
+    parser.add_argument(
+        "--cpu_count",
+        type=int,
+        default=4,
+        help="Number of CPU per trial (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--gpu_count",
+        type=int,
+        default=1,
+        help="Number of GPU per trial (default: %(default)s)",
+    )
     parser.add_argument(
         "--num_samples",
         type=int,
@@ -275,9 +290,9 @@ def main():
         help="Search algorithms (default: %(default)s)",
     )
     parser.add_argument(
-        "--no_merge_train_val",
+        "--no_retrain",
         action="store_true",
-        help="Do not add the validation set in re-training the final model after hyper-parameter search.",
+        help="Do not retrain the model with validation set after hyperparameter search.",
     )
     args, _ = parser.parse_known_args()
 
@@ -330,24 +345,19 @@ def main():
     )
     analysis = tune.run(
         tune.with_parameters(train_libmultilabel_tune, **data),
-        search_alg=init_search_algorithm(config.search_alg, metric=config.val_metric, mode=config.mode),
+        search_alg=init_search_algorithm(config.search_alg, metric=f"val_{config.val_metric}", mode=config.mode),
         scheduler=scheduler,
         local_dir=config.result_dir,
         num_samples=config.num_samples,
-        resources_per_trial={"cpu": args.cpu_count, "gpu": args.gpu_count},
+        resources_per_trial={"cpu": config.cpu_count, "gpu": config.gpu_count},
         progress_reporter=reporter,
         config=config,
         name=exp_name,
     )
-
     # Save best model after parameter search.
-    best_config = analysis.get_best_config(f"val_{config.val_metric}", config.mode, scope="all")
-    best_log_dir = analysis.get_best_logdir(f"val_{config.val_metric}", config.mode, scope="all")
-    retrain_best_model(exp_name, best_config, best_log_dir, merge_train_val=not config.no_merge_train_val)
+    best_trial = analysis.get_best_trial(metric=f"val_{config.val_metric}", mode=config.mode, scope="all")
+    retrain_best_model(exp_name, best_trial.config, best_trial.local_path, retrain=not config.no_retrain)
 
 
 if __name__ == "__main__":
-    # calculate wall time.
-    wall_time = Timer()
     main()
-    print(f"Wall time: {wall_time.time():.2f} (s)")

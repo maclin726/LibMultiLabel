@@ -2,7 +2,7 @@ import logging
 import os
 
 import numpy as np
-from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
+from lightning.pytorch.callbacks import ModelCheckpoint
 from transformers import AutoTokenizer
 
 from libmultilabel.common_utils import dump_log, is_multiclass_dataset
@@ -20,8 +20,6 @@ class TorchTrainer:
         classes(list, optional): List of class names.
         word_dict(torchtext.vocab.Vocab, optional): A vocab object which maps tokens to indices.
         embed_vecs (torch.Tensor, optional): The pre-trained word vectors of shape (vocab_size, embed_dim).
-        search_params (bool, optional): Enable pytorch-lightning trainer to report the results to ray tune
-            on validation end during hyperparameter search. Defaults to False.
         save_checkpoints (bool, optional): Whether to save the last and the best checkpoint or not.
             Defaults to True.
     """
@@ -33,7 +31,6 @@ class TorchTrainer:
         classes: list = None,
         word_dict: dict = None,
         embed_vecs=None,
-        search_params: bool = False,
         save_checkpoints: bool = True,
     ):
         self.run_name = config.run_name
@@ -84,14 +81,10 @@ class TorchTrainer:
             limit_train_batches=config.limit_train_batches,
             limit_val_batches=config.limit_val_batches,
             limit_test_batches=config.limit_test_batches,
-            search_params=search_params,
             save_checkpoints=save_checkpoints,
         )
         callbacks = [callback for callback in self.trainer.callbacks if isinstance(callback, ModelCheckpoint)]
         self.checkpoint_callback = callbacks[0] if callbacks else None
-
-        # Dump config to log
-        dump_log(self.log_path, config=config)
 
     def _setup_model(
         self,
@@ -225,6 +218,11 @@ class TorchTrainer:
                 If you want to save the best and the last model, please set `save_checkpoints` to True."
             )
 
+        dump_log(self.log_path, config=self.config)
+
+        # return best model score for ray
+        return self.checkpoint_callback.best_model_score.item() if self.checkpoint_callback.best_model_score else None
+
     def test(self, split="test"):
         """Test model with pytorch lightning trainer. Top-k predictions are saved
         if `save_k_predictions` > 0.
@@ -244,6 +242,7 @@ class TorchTrainer:
         if self.config.save_k_predictions > 0:
             self._save_predictions(test_loader, self.config.predict_out_path)
 
+        dump_log(self.log_path, config=self.config)
         return metric_dict
 
     def _save_predictions(self, dataloader, predict_out_path):
