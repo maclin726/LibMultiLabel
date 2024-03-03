@@ -11,7 +11,7 @@ from tqdm import tqdm
 from . import linear
 from . import kmeans
 
-__all__ = ["train_tree"]
+__all__ = ["train_tree", "get_label_tree", "Node"]
 
 
 class Node:
@@ -31,11 +31,17 @@ class Node:
     def isLeaf(self) -> bool:
         return len(self.children) == 0
 
-    def dfs(self, visit: Callable[[Node], None]):
-        visit(self)
+    def dfs(self, visit: Callable[[Node], None] | Callable[[Node, int], None], depth=None):
+        if depth == None:
+            visit(self)
+        else:
+            visit(self, depth)
         # Stops if self.children is empty, i.e. self is a leaf node
         for child in self.children:
-            child.dfs(visit)
+            if depth == None:
+                child.dfs(visit)
+            else:
+                child.dfs(visit, depth+1)
 
 
 class TreeModel:
@@ -272,3 +278,63 @@ def _flatten_model(root: Node) -> tuple[linear.FlatModel, np.ndarray]:
     weight_map = np.cumsum([0] + list(map(lambda w: w.shape[1], weights)))
 
     return model, weight_map
+
+
+def get_label_tree(
+    y: sparse.csr_matrix,
+    x: sparse.csr_matrix,
+    options: str = "",
+    K=100,
+    dmax=10,
+    verbose: bool = True,
+) -> Node:
+    """Trains a linear model for multiabel data using a divide-and-conquer strategy.
+    The algorithm used is based on https://github.com/xmc-aalto/bonsai.
+
+    Args:
+        y (sparse.csr_matrix): A 0/1 matrix with dimensions number of instances * number of classes.
+        x (sparse.csr_matrix): A matrix with dimensions number of instances * number of features.
+        options (str): The option string passed to liblinear.
+        K (int, optional): Maximum degree of nodes in the tree. Defaults to 100.
+        dmax (int, optional): Maximum depth of the tree. Defaults to 10.
+        verbose (bool, optional): Output extra progress information. Defaults to True.
+
+    Returns:
+        A model which can be used in predict_values.
+    """
+    label_representation = (y.T * x).tocsr()
+    label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
+    root = _build_tree(
+        label_representation, np.arange(y.shape[1]), "elkan", 0, K, dmax)
+    # root = _build_tree(
+    #     label_representation, np.arange(y.shape[1]), "balanced_spherical", 0, K, dmax)
+
+    num_nodes = 0
+
+    def count(node):
+        nonlocal num_nodes
+        num_nodes += 1
+
+    root.dfs(count)
+
+    pbar = tqdm(total=num_nodes, disable=not verbose)
+
+    def visit(node, depth):
+        relevant_instances = y[:, node.label_map].getnnz(axis=1) > 0
+        node.depth = depth
+        # x[relevant_instances].nonzero()[1] extracts the column indices with nz elements
+        node.num_nnz_feat = np.unique(x[relevant_instances].nonzero()[1]).shape[0]
+        if depth == 0:
+            print("in visit:", x.shape, y.shape, node.num_nnz_feat)
+        node.num_rel_data = np.count_nonzero(relevant_instances)
+        # if depth == 0:
+        #     print(node.num_rel_data, node.num_nnz_feat)
+        # _train_node(y[relevant_instances], x[relevant_instances], options, node)
+        pbar.update()
+
+    root.dfs(visit, 0)
+    pbar.close()
+    
+    return root
+    # flat_model, weight_map = _flatten_model(root)
+    # return TreeModel(root, flat_model, weight_map)
