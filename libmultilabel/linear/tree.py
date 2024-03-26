@@ -227,7 +227,7 @@ def _build_tree(
 
         plt.scatter(X, Y, s=0.3)
         plt.yscale("log")
-        plt.savefig(f"{label_representation.shape[0]}_{K}_{clustering}.png")
+        plt.savefig(f"figs/{label_representation.shape[0]}_{K}_{clustering}.png")
         # with open(f"eurlex_children_representation_{clustering}.pkl", "wb") as f:
         #     pickle.dump(children_representation, file=f)
 

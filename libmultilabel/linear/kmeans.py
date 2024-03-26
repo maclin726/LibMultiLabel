@@ -2,7 +2,7 @@ import numpy as np
 import scipy.sparse as sparse
 import sklearn.preprocessing
 
-__all__ = ["spherical", "balanced_spherical", "lloyd"]
+__all__ = ["spherical", "balanced_spherical", "lloyd", "random_clustering"]
 
 
 def spherical(x: sparse.csr_matrix, k: int, max_iter: int, tol: float) -> np.ndarray:
@@ -166,3 +166,7 @@ def lloyd(x: sparse.csr_matrix, k: int, max_iter: int, tol: float) -> np.ndarray
         prev_dist = avg_dist
 
     return cluster
+
+
+def random_clustering(x: sparse.csr_matrix, k: int) -> np.ndarray:
+    return np.random.randint(0, k, x.shape[0])
