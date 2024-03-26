@@ -3,11 +3,15 @@ from libmultilabel.linear import Node
 from argparse import ArgumentParser
 import os.path
 import pickle
+import time
 import numpy as np
 
 parser = ArgumentParser()
 parser.add_argument("format", help="format")
 parser.add_argument("dataset", help="data set")
+parser.add_argument("--K", type=int, default=100)
+parser.add_argument("--dmax", type=int, default=10)
+parser.add_argument("--cluster", default="elkan", choices=["elkan", "balanced_spherical", "random"])
 args = parser.parse_args()
 
 if os.path.isfile(f"data/{args.dataset}/dataset.pkl"):
@@ -24,10 +28,10 @@ else:
     with open(f"data/{args.dataset}/dataset.pkl", "wb") as f:
         pickle.dump(datasets, f)
 
-seeds = list(range(5))
+seeds = list(range(1))
 
 results = dict()
-for d in range(20):
+for d in range(args.dmax+1):
     results[d] = {"n_models": [],
                   "avg_nnz_feats_per_model": [],
                   "nnz_alpha": [],
@@ -40,18 +44,17 @@ print(datasets["train"]["x"].shape, datasets["train"]["y"].shape)
 
 for seed in seeds:
     np.random.seed(seed)
-    K = 10
-    dmax=10
     # the train_tree method for fast training on data with many labels
     root = linear.get_label_tree(
         datasets["train"]["y"], 
         datasets["train"]["x"],
-        # K=K,
-        # dmax=dmax
+        K=args.K,
+        dmax=args.dmax,
+        cluster=args.cluster
     )
     stat = dict()
     
-    for d in range(20):
+    for d in range(args.dmax+5):
         stat[d] = dict()
         stat[d]["num_label_map"] = list()
         stat[d]["num_nnz_feat"] = list()
@@ -77,35 +80,7 @@ for seed in seeds:
     tree_depth = 0
     while len(stat[tree_depth]["num_rel_data"]) > 0:
         tree_depth += 1
-    print(tree_depth)
-
-    # for i in range(1, tree_depth):
-    #     for j in range(len(stat[i]["num_rel_data"])):
-    #         stat[i]["num_rel_data_alpha"].append(
-    #             stat[i]["num_rel_data"][j] / stat[i-1]["num_rel_data"][j//K]
-    #         )
-    #     for j in range(len(stat[i]["num_nnz_feat"])):
-    #         stat[i]["num_nnz_feat_alpha"].append(
-    #             stat[i]["num_nnz_feat"][j] / stat[i-1]["num_nnz_feat"][j//K]
-    #         )
-
-    # for d in range(1, tree_depth):
-    #     rel_data_alphas = np.array(stat[d]["num_rel_data_alpha"])
-    #     macro_data_alpha = np.average(rel_data_alphas)
-    #     num_nnz_feat_alphas = np.array(stat[d]["num_nnz_feat_alpha"])
-    #     macro_nnz_feat_alpha = np.average(num_nnz_feat_alphas)
-        
-    #     results[d]["macro_nnz_feat_alpha"].append(macro_nnz_feat_alpha)
-    #     results[d]["macro_rel_data_alpha"].append(macro_data_alpha)
-
-    #     micro_data_alpha = \
-    #         np.average(np.array(stat[i]["num_rel_data"])) / \
-    #         np.average(np.array(stat[i-1]["num_rel_data"]))
-    #     micro_nnz_feat_alpha = \
-    #         np.average(np.array(stat[i]["num_nnz_feat"])) / \
-    #         np.average(np.array(stat[i-1]["num_nnz_feat"]))
-    #     results[i]["micro_nnz_feat_alpha"].append(micro_nnz_feat_alpha)
-    #     results[i]["micro_rel_data_alpha"].append(micro_data_alpha)
+    print(f"tree_depth: {tree_depth}")
 
     total_model_size = 0
     total_labels = 0
@@ -133,11 +108,15 @@ for seed in seeds:
     print(f"Model size reduction: {total_model_size} / {n*L} = {total_model_size / (n*L): .5f}")
     
 # Statistics of several label trees
+time_str = time.strftime("%Y-%m-%d-%H:%M:%S", time.localtime())
+f = open(f'logs/{time_str}-{args.dataset}-{args.cluster}-{args.K}.txt', "w")
 print(f"The information of constructed tree after {len(seeds)} times of exps")
-for d in range(10):
+print("\\begin{center}\n\\begin{tabular}{c c c c}", file=f)
+print("layer ($i$) & $c_i$ & $\\bar{n}_i$ &$\\alpha_i$\\\\", file=f)
+for d in range(args.dmax+1):
     if len(results[d]["n_models"]) == 0:
         break
-    print("\hline")
+    print("\hline", file=f)
     out = ""
     n_models = np.array(results[d]["n_models"])
     n_models_avg = np.average(n_models)
@@ -148,13 +127,20 @@ for d in range(10):
     nnz_alpha = np.array(results[d]["nnz_alpha"])
     nnz_alpha_avg = np.average(nnz_alpha)
     nnz_alpha_std = np.std(nnz_alpha)
-    out += f'{d+1} & ${n_models_avg:.0f}\pm {n_models_std:.0f}$'
-    out += f'& ${avg_nnz_feats_per_model_avg:.0f}\pm {avg_nnz_feats_per_model_std:.0f}$'
-    out += f'& ${nnz_alpha_avg*100:.2f}\\% \pm {nnz_alpha_std*100:.2f}\\%$\\\\'
-    print(out)
+    out += f'{d+1} & ${n_models_avg:.0f}$'
+    out += f'& ${avg_nnz_feats_per_model_avg:.0f}$'
+    out += f'& ${nnz_alpha_avg*100:.2f}\\%$\\\\'
+    # out += f'{d+1} & ${n_models_avg:.0f}\pm {n_models_std:.0f}$'
+    # out += f'& ${avg_nnz_feats_per_model_avg:.0f}\pm {avg_nnz_feats_per_model_std:.0f}$'
+    # out += f'& ${nnz_alpha_avg*100:.2f}\\% \pm {nnz_alpha_std*100:.2f}\\%$\\\\'
+    print(out, file=f)
 
 reductions = np.array(results["model_size_reduction"])
 reductions_avg = np.average(reductions)
 reductions_std = np.std(reductions)
-print(f"The model is reduced to {reductions_avg*100:.2f}\% \pm {reductions_std*100:.2f}\% compared to 1-vs-rest.")
-    # print(data_alphas, feat_alphas)
+print('\\multicolumn{4}{c}{', file=f, end='')
+print(f"Reduction rate: ${reductions_avg*100:.2f}\\%$", file=f, end='')
+print('}', file=f)
+print("\\end{tabular}\n\\end{center}", file=f)
+print(f"The model is reduced to ${reductions_avg*100:.2f}\% \pm {reductions_std*100:.2f}\%$ compared to 1-vs-rest.", file=f)
+f.close()

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Callable
 
+import pickle
+import matplotlib.pyplot as plt
+
 import numpy as np
 import scipy.sparse as sparse
 import sklearn.cluster
@@ -137,7 +140,7 @@ def train_tree(
     Returns:
         A model which can be used in predict_values.
     """
-    if clustering not in {"spherical", "balanced_spherical", "elkan"}:
+    if clustering not in {"spherical", "balanced_spherical", "elkan", "random"}:
         raise ValueError(f"invalid clustering {clustering}")
 
     label_representation = (y.T * x).tocsr()
@@ -202,13 +205,31 @@ def _build_tree(
         metalabels = kmeans.spherical(label_representation, K, max_iter=300, tol=0.0001)
     elif clustering == "balanced_spherical":
         metalabels = kmeans.balanced_spherical(label_representation, K, max_iter=300, tol=0.0001)
+    elif clustering == "random":
+        metalabels = kmeans.random_clustering(label_representation, K)
 
     children = []
+    children_representation = []
     for i in range(K):
         child_representation = label_representation[metalabels == i]
         child_map = label_map[metalabels == i]
+        if d == 0:
+            children_representation.append(np.count_nonzero(child_representation.toarray(), axis=1))
         child = _build_tree(child_representation, child_map, clustering, d + 1, K, dmax)
         children.append(child)
+
+    if d == 0:
+        X = []
+        Y = []
+        for i, element in enumerate(children_representation):
+            X += [i+1] * len(element)
+            Y += list(element)
+
+        plt.scatter(X, Y, s=0.3)
+        plt.yscale("log")
+        plt.savefig(f"{label_representation.shape[0]}_{K}_{clustering}.png")
+        # with open(f"eurlex_children_representation_{clustering}.pkl", "wb") as f:
+        #     pickle.dump(children_representation, file=f)
 
     return Node(label_map=label_map, children=children)
 
@@ -287,8 +308,10 @@ def get_label_tree(
     K=100,
     dmax=10,
     verbose: bool = True,
+    cluster: str = "elkan",
 ) -> Node:
-    """Trains a linear model for multiabel data using a divide-and-conquer strategy.
+    """
+    Get the information of the constructed label tree (nnz_feature, num_rel_data)
     The algorithm used is based on https://github.com/xmc-aalto/bonsai.
 
     Args:
@@ -298,16 +321,11 @@ def get_label_tree(
         K (int, optional): Maximum degree of nodes in the tree. Defaults to 100.
         dmax (int, optional): Maximum depth of the tree. Defaults to 10.
         verbose (bool, optional): Output extra progress information. Defaults to True.
-
-    Returns:
-        A model which can be used in predict_values.
     """
     label_representation = (y.T * x).tocsr()
     label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
     root = _build_tree(
-        label_representation, np.arange(y.shape[1]), "elkan", 0, K, dmax)
-    # root = _build_tree(
-    #     label_representation, np.arange(y.shape[1]), "balanced_spherical", 0, K, dmax)
+        label_representation, np.arange(y.shape[1]), cluster, 0, K, dmax)
 
     num_nodes = 0
 
@@ -324,17 +342,25 @@ def get_label_tree(
         node.depth = depth
         # x[relevant_instances].nonzero()[1] extracts the column indices with nz elements
         node.num_nnz_feat = np.unique(x[relevant_instances].nonzero()[1]).shape[0]
-        if depth == 0:
-            print("in visit:", x.shape, y.shape, node.num_nnz_feat)
         node.num_rel_data = np.count_nonzero(relevant_instances)
-        # if depth == 0:
-        #     print(node.num_rel_data, node.num_nnz_feat)
-        # _train_node(y[relevant_instances], x[relevant_instances], options, node)
         pbar.update()
 
     root.dfs(visit, 0)
     pbar.close()
     
     return root
-    # flat_model, weight_map = _flatten_model(root)
-    # return TreeModel(root, flat_model, weight_map)
+
+def get_label_representation_for_layer (
+    y: sparse.csr_matrix,
+    x: sparse.csr_matrix,
+    options: str = "",
+    K=100,
+    dmax=10,
+    verbose: bool = True,
+    cluster: str = "elkan",
+) -> Node:
+    label_representation = (y.T * x).tocsr()
+    label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
+    root = _build_tree(
+        label_representation, np.arange(y.shape[1]), cluster, 0, K, dmax)
+    
