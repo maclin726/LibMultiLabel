@@ -213,21 +213,21 @@ def _build_tree(
     for i in range(K):
         child_representation = label_representation[metalabels == i]
         child_map = label_map[metalabels == i]
-        if d == 0:
-            children_representation.append(np.count_nonzero(child_representation.toarray(), axis=1))
+        # if d == 0:
+        #     children_representation.append(np.count_nonzero(child_representation.toarray(), axis=1))
         child = _build_tree(child_representation, child_map, clustering, d + 1, K, dmax)
         children.append(child)
 
-    if d == 0:
-        X = []
-        Y = []
-        for i, element in enumerate(children_representation):
-            X += [i+1] * len(element)
-            Y += list(element)
+    # if d == 0:
+    #     X = []
+    #     Y = []
+    #     for i, element in enumerate(children_representation):
+    #         X += [i+1] * len(element)
+    #         Y += list(element)
 
-        plt.scatter(X, Y, s=0.3)
-        plt.yscale("log")
-        plt.savefig(f"figs/{label_representation.shape[0]}_{K}_{clustering}.png")
+    #     plt.scatter(X, Y, s=0.3)
+    #     plt.yscale("log")
+    #     plt.savefig(f"figs/{label_representation.shape[0]}_{K}_{clustering}.png")
         # with open(f"eurlex_children_representation_{clustering}.pkl", "wb") as f:
         #     pickle.dump(children_representation, file=f)
 
