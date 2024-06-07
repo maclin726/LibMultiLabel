@@ -13,11 +13,13 @@ parser.add_argument("mode",
                     default='all')
 parser.add_argument("format", help="format")
 parser.add_argument("dataset", help="data set")
+parser.add_argument("root_dir")
 parser.add_argument("--K", type=int, default=100)
 parser.add_argument("--dmax", type=int, default=10)
 parser.add_argument("--cluster", default="elkan", 
                     choices=["elkan", "balanced_spherical", "random"])
 parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--clip_depth", type=int, default=10)
 args = parser.parse_args()
 
 sanity_check = False
@@ -43,7 +45,7 @@ def load_dataset_pickle(format, dataset):
     
     return datasets
 
-def build_tree(datasets, dataset_name, K, dmax, cluster, seed):
+def build_tree(datasets, root_dir, dataset_name, K, dmax, cluster, seed):
     np.random.seed(seed)
     root = linear.get_label_tree(
             datasets["train"]["y"], 
@@ -53,19 +55,19 @@ def build_tree(datasets, dataset_name, K, dmax, cluster, seed):
             cluster=cluster
         )
 
-    with open(f"label_tree_obj/{dataset_name}_{cluster}_d{dmax}_K{K}_seed{seed}.pkl", "wb") as f:
+    with open(f"{root_dir}/{dataset_name}_{cluster}_d{dmax}_K{K}_seed{seed}.pkl", "wb") as f:
         pickle.dump(root, f)
         print(f"Save tree pickle named {dataset_name}_{cluster}_d{dmax}_K{K}_seed{seed}.pkl")
 
-def load_tree(dataset_name, K, dmax, cluster, seed):
+def load_tree(root_dir, dataset_name, K, dmax, cluster, seed):
     try:
-        with open(f"label_tree_obj/{dataset_name}_{cluster}_d{dmax}_K{K}_seed{seed}.pkl", "rb") as f:
+        with open(f"{root_dir}/{dataset_name}_{cluster}_d{dmax}_K{K}_seed{seed}.pkl", "rb") as f:
             root = pickle.load(f)
         return root
     except:
         print("Label tree pickle does not exist.")
 
-def get_depthwise_stat(root):
+def get_depthwise_stat(root, clip_depth):
     stat = dict()
     
     for d in range(args.dmax+2):
@@ -117,7 +119,8 @@ def get_depthwise_stat(root):
         stat[node.depth]["num_nnz_feats"].append(node.num_nnz_feat)
         stat[node.depth]["num_children"].append(len(node.children))
         
-        if node.isLeaf():
+        nonlocal clip_depth
+        if node.isLeaf() or node.depth == clip_depth:
             stat[node.depth]["num_branches"].append(len(node.label_map))
         else:
             stat[node.depth]["num_branches"].append(len(node.children))
@@ -128,7 +131,7 @@ def get_depthwise_stat(root):
     while len(stat[tree_depth]["num_train"]) > 0:
         tree_depth += 1
 
-    return stat, tree_depth
+    return stat, min(tree_depth, clip_depth+1)
 
 def get_sparsity(stat, tree_depth):
     tree_size = 0
@@ -140,7 +143,7 @@ def get_sparsity(stat, tree_depth):
 
         for num_children, num_labels in\
             zip(stat[d]["num_children"], stat[d]["num_labels"]):
-            if num_children == 0:
+            if num_children == 0 or d == tree_depth-1:
                 total_labels += num_labels
 
     n = stat[0]["num_nnz_feats"][0]
@@ -155,20 +158,32 @@ datasets = load_dataset_pickle(args.format, args.dataset)
 # build tree
 if args.mode == 'all' or args.mode == 'build_tree':
     build_tree(
-        datasets, args.dataset, args.K, args.dmax, args.cluster, args.seed)
+        datasets, args.root_dir, args.dataset, args.K, args.dmax, args.cluster, args.seed)
 
 # load tree
 if args.mode == 'all' or args.mode == 'load_tree':
-    tree_files = [filename for filename in os.listdir("label_tree_obj")\
+    tree_files = [filename for filename in os.listdir(args.root_dir)\
               if filename.startswith(
                   f"{args.dataset}_{args.cluster}_d{args.dmax}_K{args.K}")]
     
     seeds = [int(file.split("seed")[1].split(".")[0]) for file in tree_files]
+    
+    results = []
     for seed in seeds:
-        root = load_tree(args.dataset, args.K, args.dmax, args.cluster, seed)
-        stat, tree_depth = get_depthwise_stat(root)
+        root = load_tree(args.root_dir, args.dataset, args.K, args.dmax, args.cluster, seed)
+        stat, tree_depth = get_depthwise_stat(root, args.clip_depth)
+
+        print("\n")
+        print("tree depth:", tree_depth)
+        leafs = np.array(stat[tree_depth-1]["num_labels"])
+        print(leafs)
+        print("leaf nodes:", np.count_nonzero(leafs > 0))
+        print("larger than K:", np.count_nonzero(leafs > args.K))
+        print("larger than 1:", np.count_nonzero(leafs > 1))
         sparsity = get_sparsity(stat, tree_depth)
+        results.append(sparsity)
         print(f"seed {seed} sparsity: {sparsity:.5f}")
+    print(f"{sum(results)/len(results):.5f}")
 
 # results = dict()
 # for d in range(args.dmax+1):
