@@ -338,12 +338,14 @@ def get_label_tree(
     pbar = tqdm(total=num_nodes, disable=not verbose)
 
     def visit(node, depth):
-        relevant_instances = y[:, node.label_map].getnnz(axis=1) > 0
         node.depth = depth
+        # relevant_instances = y[:, node.label_map].getnnz(axis=1) > 0
         # x[relevant_instances].nonzero()[1] extracts the column indices with nz elements
         # node.num_nnz_feat = np.unique(x[relevant_instances].nonzero()[1]).shape[0]
-        node.num_nnz_feat = np.count_nonzero(x[relevant_instances].sum(axis=0))
-        node.num_rel_data = np.count_nonzero(relevant_instances)
+        # node.num_nnz_feat = np.count_nonzero(x[relevant_instances].sum(axis=0))
+        # node.num_rel_data = np.count_nonzero(relevant_instances)
+        
+        node.num_nnz_feat = np.count_nonzero(label_representation[node.label_map,:].sum(axis=0))
         pbar.update()
 
     root.dfs(visit, 0)
