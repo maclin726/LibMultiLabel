@@ -115,7 +115,7 @@ def get_depthwise_stat(root, clip_depth):
         #     sanity_check = True
 
         stat[node.depth]["num_labels"].append(len(node.label_map))
-        stat[node.depth]["num_train"].append(node.num_rel_data)
+        # stat[node.depth]["num_train"].append(node.num_rel_data)
         stat[node.depth]["num_nnz_feats"].append(node.num_nnz_feat)
         stat[node.depth]["num_children"].append(len(node.children))
         
@@ -128,7 +128,7 @@ def get_depthwise_stat(root, clip_depth):
     root.dfs(collect_stat)
 
     tree_depth = 0
-    while len(stat[tree_depth]["num_train"]) > 0:
+    while len(stat[tree_depth]["num_labels"]) > 0:
         tree_depth += 1
 
     return stat, min(tree_depth, clip_depth+1)
@@ -175,8 +175,7 @@ if args.mode == 'all' or args.mode == 'load_tree':
 
         print("\n")
         print("tree depth:", tree_depth)
-        leafs = np.array(stat[tree_depth-1]["num_labels"])
-        print(leafs)
+        leafs = np.array(stat[tree_depth-1]["num_branches"])
         print("leaf nodes:", np.count_nonzero(leafs > 0))
         print("larger than K:", np.count_nonzero(leafs > args.K))
         print("larger than 1:", np.count_nonzero(leafs > 1))

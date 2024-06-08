@@ -339,7 +339,7 @@ def get_label_tree(
 
     def visit(node, depth):
         node.depth = depth
-        # relevant_instances = y[:, node.label_map].getnnz(axis=1) > 0
+        # relexvant_instances = y[:, node.label_map].getnnz(axis=1) > 0
         # x[relevant_instances].nonzero()[1] extracts the column indices with nz elements
         # node.num_nnz_feat = np.unique(x[relevant_instances].nonzero()[1]).shape[0]
         # node.num_nnz_feat = np.count_nonzero(x[relevant_instances].sum(axis=0))
