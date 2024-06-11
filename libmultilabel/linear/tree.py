@@ -124,6 +124,7 @@ def train_tree(
     K=100,
     dmax=10,
     verbose: bool = True,
+    path: str = None,
 ) -> TreeModel:
     """Trains a linear model for multiabel data using a divide-and-conquer strategy.
     The algorithm used is based on https://github.com/xmc-aalto/bonsai.
@@ -145,7 +146,13 @@ def train_tree(
 
     label_representation = (y.T * x).tocsr()
     label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
-    root = _build_tree(label_representation, np.arange(y.shape[1]), clustering, 0, K, dmax)
+
+    if path is not None:
+        with open(path, "rb") as f:
+            root = pickle.load(f)
+        print(f"Succesfully load tree {path}")
+    else:
+        root = _build_tree(label_representation, np.arange(y.shape[1]), clustering, 0, K, dmax)
 
     num_nodes = 0
 
