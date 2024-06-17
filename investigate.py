@@ -27,8 +27,8 @@ def compute_ratio_fixed_K(L, K, a):
     rate = []
     D = math.ceil(math.log(L, K))
     for d in range(2, D+1):
-        rate.append(((a)**(d-1)-1/L) / (K*a-1) + a**(d-1))
-    return np.array(rate) * 100
+        rate.append( (K/L)*(((K*a)**(d-1)-1)/(K*a-1)) + a**(d-1) )
+    return np.array(rate)
 
 def compute_ratio_controlled_depth(L, a):
     rate = []
@@ -48,18 +48,18 @@ axs.set_xticks([2,3,4,5])
 axs.tick_params("x", labelsize=20)
 axs.tick_params("y", labelsize=15)
 axs.grid()
-for a in [1, 3, 5, 7, 9]:
-# for a in [0.3, 0.4, 0.5]:
-    # X = list(range(2,5))
-    # Y = compute_ratio_fixed_K(3000000, 100, a)
-    X = list(range(2, 6))
-    Y = compute_ratio_controlled_depth(3000000, a)
+# for a in [1, 3, 5, 7, 9]:
+for a in [0.3, 0.4, 0.5]:
+    X = list(range(2,5))
+    Y = compute_ratio_fixed_K(3000000, 100, a)
+    # X = list(range(2, 6))
+    # Y = compute_ratio_controlled_depth(3000000, a)
     axs.plot(X, Y, "-o", label=f"$\\alpha$={a}")
     for x, y in zip(X, Y):
-        axs.annotate(f"{y:.01f}",xy=(x,y+1))
-axs.legend()
-axs.set_xlabel('Tree Depth', fontsize=20)
-axs.set_ylabel("Reduction Rate (%)", fontsize=15)
+        axs.annotate(f"{y:.02f}",xy=(x,y+0.01), fontsize=15)
+axs.legend(fontsize=15)
+axs.set_xlabel('Tree depth', fontsize=20)
+axs.set_ylabel("# non-zeros in weight matrix: Tree / OVR", fontsize=14)
 fig.tight_layout()
-fig.savefig(f"figs/controlled-depth-with-different-alpha.png")
-# fig.savefig(f"figs/fixed-K-with-different-alpha.png")
+# fig.savefig(f"figs/controlled-depth-with-different-alpha.png")
+fig.savefig(f"figs/fixed-K-with-different-alpha.png")
