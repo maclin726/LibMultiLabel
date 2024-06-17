@@ -1,11 +1,13 @@
 import libmultilabel.linear as linear
 from libmultilabel.linear import Node
 from argparse import ArgumentParser
+from hurry.filesize import size
 import os.path
 import pickle
 import time
 import numpy as np
 import tqdm
+import re
 
 parser = ArgumentParser()
 parser.add_argument("mode", 
@@ -13,13 +15,15 @@ parser.add_argument("mode",
                     default='all')
 parser.add_argument("format", help="format")
 parser.add_argument("dataset", help="data set")
-parser.add_argument("root_dir")
+parser.add_argument("tree_root_dir", 
+                    help="the directory to store label trees")
 parser.add_argument("--K", type=int, default=100)
 parser.add_argument("--dmax", type=int, default=10)
 parser.add_argument("--cluster", default="elkan", 
                     choices=["elkan", "balanced_spherical", "random"])
 parser.add_argument("--seed", type=int, default=0)
-parser.add_argument("--clip_depth", type=int, default=10)
+parser.add_argument("--clip_depth", type=int, default=10, 
+                    help="specify the depth you want to compute the model size")
 args = parser.parse_args()
 
 sanity_check = False
@@ -45,7 +49,7 @@ def load_dataset_pickle(format, dataset):
     
     return datasets
 
-def build_tree(datasets, root_dir, dataset_name, K, dmax, cluster, seed):
+def build_tree(datasets, tree_root_dir, dataset_name, K, dmax, cluster, seed):
     np.random.seed(seed)
     root = linear.get_label_tree(
             datasets["train"]["y"], 
@@ -55,13 +59,13 @@ def build_tree(datasets, root_dir, dataset_name, K, dmax, cluster, seed):
             cluster=cluster
         )
 
-    with open(f"{root_dir}/{dataset_name}_{cluster}_d{dmax}_K{K}_seed{seed}.pkl", "wb") as f:
+    with open(f"{tree_root_dir}/{dataset_name}_{cluster}_d{dmax}_K{K}_seed{seed}.pkl", "wb") as f:
         pickle.dump(root, f)
         print(f"Save tree pickle named {dataset_name}_{cluster}_d{dmax}_K{K}_seed{seed}.pkl")
 
-def load_tree(root_dir, dataset_name, K, dmax, cluster, seed):
+def load_tree(tree_root_dir, dataset_name, K, dmax, cluster, seed):
     try:
-        with open(f"{root_dir}/{dataset_name}_{cluster}_d{dmax}_K{K}_seed{seed}.pkl", "rb") as f:
+        with open(f"{tree_root_dir}/{dataset_name}_{cluster}_d{dmax}_K{K}_seed{seed}.pkl", "rb") as f:
             root = pickle.load(f)
         return root
     except:
@@ -70,15 +74,14 @@ def load_tree(root_dir, dataset_name, K, dmax, cluster, seed):
 def get_depthwise_stat(root, clip_depth):
     stat = dict()
     
-    for d in range(args.dmax+2):
+    for d in range(args.dmax+5):
         stat[d] = {
             "num_labels": [],
             "num_nnz_feats": [],
-            "num_train": [],    # number of training data in this node
             "num_children": [], # number of internal child nodes
-            "num_branches": [],
-            "num_nnz_feats_alpha": [],
-            "num_rel_data_alpha": [],
+            "num_branches": [], # number of classifiers to train
+            # "num_nnz_feats_alpha": [],
+            # "num_rel_data_alpha": [],
         }
 
     def collect_stat(node: Node):
@@ -115,7 +118,6 @@ def get_depthwise_stat(root, clip_depth):
         #     sanity_check = True
 
         stat[node.depth]["num_labels"].append(len(node.label_map))
-        # stat[node.depth]["num_train"].append(node.num_rel_data)
         stat[node.depth]["num_nnz_feats"].append(node.num_nnz_feat)
         stat[node.depth]["num_children"].append(len(node.children))
         
@@ -133,23 +135,31 @@ def get_depthwise_stat(root, clip_depth):
 
     return stat, min(tree_depth, clip_depth+1)
 
-def get_sparsity(stat, tree_depth):
-    tree_size = 0
+def get_nnz_for_tree_model(stat, tree_depth):
+    tree_nnz = 0
     total_labels = 0
     for d in range(tree_depth):
         n_feat = np.array(stat[d]["num_nnz_feats"])
         n_model = np.array(stat[d]["num_branches"])
-        tree_size += np.dot(n_feat, n_model)
+        tree_nnz += np.dot(n_feat, n_model)
 
+        # sanity check 
         for num_children, num_labels in\
             zip(stat[d]["num_children"], stat[d]["num_labels"]):
             if num_children == 0 or d == tree_depth-1:
                 total_labels += num_labels
 
-    n = stat[0]["num_nnz_feats"][0]
     L = stat[0]["num_labels"][0]
     assert(total_labels == L)
-    return tree_size / (n*L)
+    return tree_nnz
+
+def get_estimated_model_size(stat, tree_depth):
+    return get_nnz_for_tree_model(stat, tree_depth) * 12
+
+def get_tree_OVR_size_ratio(stat, tree_depth):
+    n = stat[0]["num_nnz_feats"][0]
+    L = stat[0]["num_labels"][0]
+    return get_nnz_for_tree_model(stat, tree_depth)*1.5 / (n*L)
 
 
 # load datasets
@@ -158,31 +168,46 @@ datasets = load_dataset_pickle(args.format, args.dataset)
 # build tree
 if args.mode == 'all' or args.mode == 'build_tree':
     build_tree(
-        datasets, args.root_dir, args.dataset, args.K, args.dmax, args.cluster, args.seed)
+        datasets, args.tree_root_dir, args.dataset, args.K, args.dmax, args.cluster, args.seed)
 
 # load tree
 if args.mode == 'all' or args.mode == 'load_tree':
-    tree_files = [filename for filename in os.listdir(args.root_dir)\
+    tree_files = [filename for filename in os.listdir(args.tree_root_dir)\
               if filename.startswith(
                   f"{args.dataset}_{args.cluster}_d{args.dmax}_K{args.K}")]
-    
+            # if args.dataset in filename and str(args.K) in filename]
+    print(tree_files)
     seeds = [int(file.split("seed")[1].split(".")[0]) for file in tree_files]
     
-    results = []
+    results = {"ratio": [], "model_size": []}
     for seed in seeds:
-        root = load_tree(args.root_dir, args.dataset, args.K, args.dmax, args.cluster, seed)
+        root = load_tree(args.tree_root_dir, args.dataset, args.K, args.dmax, args.cluster, seed)
         stat, tree_depth = get_depthwise_stat(root, args.clip_depth)
 
         print("\n")
-        print("tree depth:", tree_depth)
+        print("Tree depth (include leaves):", tree_depth)
         leafs = np.array(stat[tree_depth-1]["num_branches"])
-        print("leaf nodes:", np.count_nonzero(leafs > 0))
+        print("Number of leaf nodes:", np.count_nonzero(leafs > 0))
         print("larger than K:", np.count_nonzero(leafs > args.K))
         print("larger than 1:", np.count_nonzero(leafs > 1))
-        sparsity = get_sparsity(stat, tree_depth)
-        results.append(sparsity)
-        print(f"seed {seed} sparsity: {sparsity:.5f}")
-    print(f"{sum(results)/len(results):.5f}")
+        
+        tree_OVR_size_ratio = get_tree_OVR_size_ratio(stat, tree_depth)
+        n = stat[0]["num_nnz_feats"][0]
+        L = stat[0]["num_labels"][0]
+        results["model_size"].append(
+            get_estimated_model_size(stat, tree_depth))
+        results["ratio"].append(tree_OVR_size_ratio)
+        print(f"seed {seed} size ratio: {tree_OVR_size_ratio:.5f}")
+    
+    avg_tree_model_size = \
+        sum(results["model_size"])/len(results["model_size"])/(1024**3)
+    avg_ratio = avg_tree_model_size / (n*L*8/(1024**3))
+    
+    print("\n")
+    print(f"Avg ratio: Tree({avg_tree_model_size:.3f}) GB / OVR({n*L*8/(1024**3):.3f} GB) = {avg_ratio:.5f}")
+    # print(f"Average tree model size: {avg_tree_model_size:.3f} GB")
+    # print(f"OVR model size: {n*L*8/(1024**3):.3f} GB")
+    # print(f"Average Ratio: {avg_ratio}")
 
 # results = dict()
 # for d in range(args.dmax+1):

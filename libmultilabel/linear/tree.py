@@ -144,14 +144,13 @@ def train_tree(
     if clustering not in {"spherical", "balanced_spherical", "elkan", "random"}:
         raise ValueError(f"invalid clustering {clustering}")
 
-    label_representation = (y.T * x).tocsr()
-    label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
-
     if path is not None:
         with open(path, "rb") as f:
             root = pickle.load(f)
         print(f"Succesfully load tree {path}")
     else:
+        label_representation = (y.T * x).tocsr()
+        label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
         root = _build_tree(label_representation, np.arange(y.shape[1]), clustering, 0, K, dmax)
 
     num_nodes = 0
@@ -216,27 +215,11 @@ def _build_tree(
         metalabels = kmeans.random_clustering(label_representation, K)
 
     children = []
-    children_representation = []
     for i in range(K):
         child_representation = label_representation[metalabels == i]
         child_map = label_map[metalabels == i]
-        # if d == 0:
-        #     children_representation.append(np.count_nonzero(child_representation.toarray(), axis=1))
         child = _build_tree(child_representation, child_map, clustering, d + 1, K, dmax)
         children.append(child)
-
-    # if d == 0:
-    #     X = []
-    #     Y = []
-    #     for i, element in enumerate(children_representation):
-    #         X += [i+1] * len(element)
-    #         Y += list(element)
-
-    #     plt.scatter(X, Y, s=0.3)
-    #     plt.yscale("log")
-    #     plt.savefig(f"figs/{label_representation.shape[0]}_{K}_{clustering}.png")
-        # with open(f"eurlex_children_representation_{clustering}.pkl", "wb") as f:
-        #     pickle.dump(children_representation, file=f)
 
     return Node(label_map=label_map, children=children)
 
@@ -359,18 +342,3 @@ def get_label_tree(
     pbar.close()
     
     return root
-
-def get_label_representation_for_layer (
-    y: sparse.csr_matrix,
-    x: sparse.csr_matrix,
-    options: str = "",
-    K=100,
-    dmax=10,
-    verbose: bool = True,
-    cluster: str = "elkan",
-) -> Node:
-    label_representation = (y.T * x).tocsr()
-    label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
-    root = _build_tree(
-        label_representation, np.arange(y.shape[1]), cluster, 0, K, dmax)
-    
