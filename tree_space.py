@@ -9,7 +9,7 @@ from libmultilabel.linear import Node
 
 parser = ArgumentParser()
 parser.add_argument("mode",
-                    choices=['all', 'build_tree', 'load_tree'],
+                    choices=['all', 'build_tree', 'load_tree', 'clip_tree'],
                     default='all')
 parser.add_argument("format", help="format")
 parser.add_argument("dataset", help="data set")
@@ -72,6 +72,20 @@ def load_tree(tree_root_dir, dataset_name, K, dmax, cluster, seed):
         return root
     except:
         print("Label tree pickle does not exist.")
+
+
+def clip_tree(tree_root_dir, dataset_name, K, dmax, cluster, seed, clip_depth):
+    root = load_tree(tree_root_dir, dataset_name, K, dmax, cluster, seed)
+    
+    def clip(node: Node):
+        nonlocal clip_depth
+        if node.depth == clip_depth:
+            node.children = []
+
+    root.dfs(clip)
+
+    with open(f"{tree_root_dir}/{dataset_name}_{cluster}_d{clip_depth}_K{K}_seed{seed}.pkl", "wb") as f:
+        pickle.dump(root, file=f)
 
 
 def get_depthwise_stat(root, clip_depth):
@@ -169,7 +183,7 @@ def get_tree_OVR_size_ratio(stat, tree_depth):
 
 
 # load datasets
-datasets = load_dataset_pickle(args.format, args.dataset)
+# datasets = load_dataset_pickle(args.format, args.dataset)
 
 # build tree
 if args.mode == 'all' or args.mode == 'build_tree':
@@ -195,7 +209,13 @@ if args.mode == 'all' or args.mode == 'load_tree':
         print("Tree depth (include leaves):", tree_depth)
         leafs = np.array(stat[tree_depth-1]["num_branches"])
         print("Number of leaf nodes:", np.count_nonzero(leafs > 0))
-        print("larger than K:", np.count_nonzero(leafs > args.K))
+
+        print("# leaves with > K labels:", np.count_nonzero(leafs > args.K))
+        sum_labels = 0
+        for _ in leafs:
+            if _ > args.K:
+                sum_labels += _
+        print("# labels in nodes with > K labels", sum_labels)
         print("larger than 1:", np.count_nonzero(leafs > 1))
 
         tree_OVR_size_ratio = get_tree_OVR_size_ratio(stat, tree_depth)
@@ -213,3 +233,16 @@ if args.mode == 'all' or args.mode == 'load_tree':
     print("\n")
     print(
         f"Avg ratio: Tree({avg_tree_model_size:.3f}) GB / OVR({n*L*8/(1024**3):.3f} GB) = {avg_ratio:.5f}")
+
+
+if args.mode == 'clip_tree':
+    tree_files = [filename for filename in os.listdir(args.tree_root_dir)
+                  if filename.startswith(
+                  f"{args.dataset}_{args.cluster}_d{args.dmax}_K{args.K}")]
+    # if args.dataset in filename and str(args.K) in filename]
+    print(tree_files)
+    seeds = [int(file.split("seed")[1].split(".")[0]) for file in tree_files]
+
+    for seed in seeds:
+        clip_tree(args.tree_root_dir, args.dataset,
+                    args.K, args.dmax, args.cluster, seed, args.clip_depth)
