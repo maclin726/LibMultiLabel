@@ -1,5 +1,6 @@
 import os.path
 import pickle
+import json
 from argparse import ArgumentParser
 
 import numpy as np
@@ -22,6 +23,7 @@ parser.add_argument("--cluster", default="elkan",
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--clip_depth", type=int, default=10,
                     help="specify the depth you want to compute the model size")
+parser.add_argument("--verbose", action="store_true")
 args = parser.parse_args()
 
 sanity_check = False
@@ -173,7 +175,7 @@ def get_nnz_for_tree_model(stat, tree_depth):
 
 
 def get_estimated_model_size(stat, tree_depth):
-    return get_nnz_for_tree_model(stat, tree_depth) * 12
+    return int(get_nnz_for_tree_model(stat, tree_depth) * 12)
 
 
 def get_tree_OVR_size_ratio(stat, tree_depth):
@@ -183,7 +185,7 @@ def get_tree_OVR_size_ratio(stat, tree_depth):
 
 
 # load datasets
-# datasets = load_dataset_pickle(args.format, args.dataset)
+datasets = load_dataset_pickle(args.format, args.dataset)
 
 # build tree
 if args.mode == 'all' or args.mode == 'build_tree':
@@ -199,40 +201,52 @@ if args.mode == 'all' or args.mode == 'load_tree':
     print(tree_files)
     seeds = [int(file.split("seed")[1].split(".")[0]) for file in tree_files]
 
-    results = {"ratio": [], "model_size": []}
-    for seed in seeds:
+    results = {"ratio": [], 
+               "model_size": [], 
+               "nr_unfinished_nodes": [], 
+               "nr_unfinished_labels":[],
+               }
+    for seed in sorted(seeds):
         root = load_tree(args.tree_root_dir, args.dataset,
                          args.K, args.dmax, args.cluster, seed)
         stat, tree_depth = get_depthwise_stat(root, args.clip_depth)
 
-        print("\n")
-        print("Tree depth (include leaves):", tree_depth)
         leafs = np.array(stat[tree_depth-1]["num_branches"])
-        print("Number of leaf nodes:", np.count_nonzero(leafs > 0))
-
-        print("# leaves with > K labels:", np.count_nonzero(leafs > args.K))
         sum_labels = 0
         for _ in leafs:
             if _ > args.K:
                 sum_labels += _
-        print("# labels in nodes with > K labels", sum_labels)
-        print("larger than 1:", np.count_nonzero(leafs > 1))
-
         tree_OVR_size_ratio = get_tree_OVR_size_ratio(stat, tree_depth)
+
+
         n = stat[0]["num_nnz_feats"][0]
         L = stat[0]["num_labels"][0]
         results["model_size"].append(
             get_estimated_model_size(stat, tree_depth))
-        results["ratio"].append(tree_OVR_size_ratio)
-        print(f"seed {seed} size ratio: {tree_OVR_size_ratio:.5f}")
+        results["ratio"].append(round(tree_OVR_size_ratio, 5))
+        results["nr_unfinished_nodes"].append(
+            int(np.count_nonzero(leafs > args.K)))
+        results["nr_unfinished_labels"].append(int(sum_labels))
+
+        if args.verbose:
+            print("\n")
+            print("Tree depth (include leaves):", tree_depth)
+            print("Number of leaf nodes:", np.count_nonzero(leafs > 0))
+            print("# leaves with > K labels:", np.count_nonzero(leafs > args.K))
+            print("# labels in nodes with > K labels", sum_labels)
+            print("larger than 1:", np.count_nonzero(leafs > 1))
+            print(f"seed {seed} size ratio: {tree_OVR_size_ratio:.5f}")
 
     avg_tree_model_size = \
         sum(results["model_size"])/len(results["model_size"])/(1024**3)
     avg_ratio = avg_tree_model_size / (n*L*8/(1024**3))
 
-    print("\n")
-    print(
-        f"Avg ratio: Tree({avg_tree_model_size:.3f}) GB / OVR({n*L*8/(1024**3):.3f} GB) = {avg_ratio:.5f}")
+    if args.verbose:
+        print("\n")
+        print(
+            f"Avg ratio: Tree({avg_tree_model_size:.3f} GB) / OVR({n*L*8/(1024**3):.3f} GB) = {avg_ratio:.5f}")
+    with open(f"logs/{args.dataset}_{args.cluster}_d{args.clip_depth}_K{args.K}.json", "w") as f:
+        f.writelines(json.dumps(results))
 
 
 if args.mode == 'clip_tree':
