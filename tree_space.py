@@ -184,11 +184,11 @@ def get_tree_OVR_size_ratio(stat, tree_depth):
     return get_nnz_for_tree_model(stat, tree_depth)*1.5 / (n*L)
 
 
-# load datasets
-datasets = load_dataset_pickle(args.format, args.dataset)
 
 # build tree
 if args.mode == 'all' or args.mode == 'build_tree':
+    # load datasets
+    datasets = load_dataset_pickle(args.format, args.dataset)
     build_tree(
         datasets, args.tree_root_dir, args.dataset, args.K, args.dmax, args.cluster, args.seed)
 

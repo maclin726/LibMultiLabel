@@ -161,7 +161,7 @@ def train_tree(
 
     root.dfs(count)
 
-    pbar = tqdm(total=num_nodes, disable=not verbose)
+    pbar = tqdm(total=num_nodes, disable=not verbose, ncols=79)
 
     def visit(node):
         relevant_instances = y[:, node.label_map].getnnz(axis=1) > 0
@@ -277,6 +277,8 @@ def _flatten_model(root: Node) -> tuple[linear.FlatModel, np.ndarray]:
 
     root.dfs(visit)
 
+    
+
     model = linear.FlatModel(
         name="flattened-tree",
         weights=sparse.hstack(weights, "csr"),
@@ -325,7 +327,7 @@ def get_label_tree(
 
     root.dfs(count)
 
-    pbar = tqdm(total=num_nodes, disable=not verbose)
+    pbar = tqdm(total=num_nodes, disable=not verbose, ncols=79)
 
     def visit(node, depth):
         node.depth = depth
