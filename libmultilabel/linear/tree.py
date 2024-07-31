@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Callable
 
+import pickle
+import matplotlib.pyplot as plt
+
 import numpy as np
 import scipy.sparse as sparse
 import sklearn.cluster
@@ -9,8 +12,9 @@ import sklearn.preprocessing
 from tqdm import tqdm
 
 from . import linear
+# from . import kmeans
 
-__all__ = ["train_tree", "TreeModel"]
+__all__ = ["train_tree", "get_label_tree", "Node"]
 
 
 class Node:
@@ -30,16 +34,20 @@ class Node:
     def isLeaf(self) -> bool:
         return len(self.children) == 0
 
-    def dfs(self, visit: Callable[[Node], None]):
-        visit(self)
+    def dfs(self, visit: Callable[[Node], None] | Callable[[Node, int], None], depth=None):
+        if depth == None:
+            visit(self)
+        else:
+            visit(self, depth)
         # Stops if self.children is empty, i.e. self is a leaf node
         for child in self.children:
-            child.dfs(visit)
+            if depth == None:
+                child.dfs(visit)
+            else:
+                child.dfs(visit, depth+1)
 
 
 class TreeModel:
-    """A model returned from train_tree."""
-
     def __init__(
         self,
         root: Node,
@@ -112,10 +120,12 @@ def train_tree(
     y: sparse.csr_matrix,
     x: sparse.csr_matrix,
     options: str = "",
+    clustering: str = "spherical",
     K=100,
     dmax=10,
     verbose: bool = True,
-) -> TreeModel:
+    path: str = None,
+) -> tuple[TreeModel, float]:
     """Trains a linear model for multiabel data using a divide-and-conquer strategy.
     The algorithm used is based on https://github.com/xmc-aalto/bonsai.
 
@@ -123,6 +133,7 @@ def train_tree(
         y (sparse.csr_matrix): A 0/1 matrix with dimensions number of instances * number of classes.
         x (sparse.csr_matrix): A matrix with dimensions number of instances * number of features.
         options (str): The option string passed to liblinear.
+        clustering (str): Clustering algorithm, one of {spherical, balanced_spherical, elkan}. Defaults to spherical.
         K (int, optional): Maximum degree of nodes in the tree. Defaults to 100.
         dmax (int, optional): Maximum depth of the tree. Defaults to 10.
         verbose (bool, optional): Output extra progress information. Defaults to True.
@@ -130,9 +141,17 @@ def train_tree(
     Returns:
         A model which can be used in predict_values.
     """
-    label_representation = (y.T * x).tocsr()
-    label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
-    root = _build_tree(label_representation, np.arange(y.shape[1]), 0, K, dmax)
+    if clustering not in {"spherical", "balanced_spherical", "elkan", "random"}:
+        raise ValueError(f"invalid clustering {clustering}")
+
+    if path is not None:
+        with open(path, "rb") as f:
+            root = pickle.load(f)
+        print(f"Succesfully load tree {path}")
+    else:
+        label_representation = (y.T * x).tocsr()
+        label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
+        root = _build_tree(label_representation, np.arange(y.shape[1]), clustering, 0, K, dmax)
 
     num_nodes = 0
 
@@ -142,7 +161,7 @@ def train_tree(
 
     root.dfs(count)
 
-    pbar = tqdm(total=num_nodes, disable=not verbose)
+    pbar = tqdm(total=num_nodes, disable=not verbose, ncols=79)
 
     def visit(node):
         relevant_instances = y[:, node.label_map].getnnz(axis=1) > 0
@@ -153,15 +172,23 @@ def train_tree(
     pbar.close()
 
     flat_model, weight_map = _flatten_model(root)
-    return TreeModel(root, flat_model, weight_map)
+    
+    tree_model = TreeModel(root, flat_model, weight_map)
+    train_time = pbar.format_dict["elapsed"]
+    model_nnz = tree_model.flat_model.weights.nnz
+    return tree_model, train_time, model_nnz
+    # return TreeModel(root, flat_model, weight_map)
 
 
-def _build_tree(label_representation: sparse.csr_matrix, label_map: np.ndarray, d: int, K: int, dmax: int) -> Node:
+def _build_tree(
+    label_representation: sparse.csr_matrix, label_map: np.ndarray, clustering: str, d: int, K: int, dmax: int
+) -> Node:
     """Builds the tree recursively by kmeans clustering.
 
     Args:
         label_representation (sparse.csr_matrix): A matrix with dimensions number of classes under this node * number of features.
         label_map (np.ndarray): Maps 0..label_representation.shape[0] to the original label indices.
+        clustering (str): Clustering algorithm, one of {spherical, balanced_spherical, elkan}. Defaults to spherical.
         d (int): Current depth.
         K (int): Maximum degree of nodes in the tree.
         dmax (int): Maximum depth of the tree.
@@ -172,24 +199,31 @@ def _build_tree(label_representation: sparse.csr_matrix, label_map: np.ndarray, 
     if d >= dmax or label_representation.shape[0] <= K:
         return Node(label_map=label_map, children=[])
 
-    metalabels = (
-        sklearn.cluster.KMeans(
-            K,
-            random_state=np.random.randint(2**31 - 1),
-            n_init=1,
-            max_iter=300,
-            tol=0.0001,
-            algorithm="elkan",
+    if clustering == "elkan":
+        metalabels = (
+            sklearn.cluster.KMeans(
+                K,
+                random_state=np.random.randint(2**31 - 1),
+                n_init=1,
+                max_iter=300,
+                tol=0.0001,
+                algorithm="elkan",
+            )
+            .fit(label_representation)
+            .labels_
         )
-        .fit(label_representation)
-        .labels_
-    )
+    # elif clustering == "spherical":
+    #     metalabels = kmeans.spherical(label_representation, K, max_iter=300, tol=0.0001)
+    # elif clustering == "balanced_spherical":
+    #     metalabels = kmeans.balanced_spherical(label_representation, K, max_iter=300, tol=0.0001)
+    # elif clustering == "random":
+    #     metalabels = kmeans.random_clustering(label_representation, K)
 
     children = []
     for i in range(K):
         child_representation = label_representation[metalabels == i]
         child_map = label_map[metalabels == i]
-        child = _build_tree(child_representation, child_map, d + 1, K, dmax)
+        child = _build_tree(child_representation, child_map, clustering, d + 1, K, dmax)
         children.append(child)
 
     return Node(label_map=label_map, children=children)
@@ -248,6 +282,8 @@ def _flatten_model(root: Node) -> tuple[linear.FlatModel, np.ndarray]:
 
     root.dfs(visit)
 
+    
+
     model = linear.FlatModel(
         name="flattened-tree",
         weights=sparse.hstack(weights, "csr"),
@@ -260,3 +296,56 @@ def _flatten_model(root: Node) -> tuple[linear.FlatModel, np.ndarray]:
     weight_map = np.cumsum([0] + list(map(lambda w: w.shape[1], weights)))
 
     return model, weight_map
+
+
+def get_label_tree(
+    y: sparse.csr_matrix,
+    x: sparse.csr_matrix,
+    options: str = "",
+    K=100,
+    dmax=10,
+    verbose: bool = True,
+    cluster: str = "elkan",
+) -> Node:
+    """
+    Get the information of the constructed label tree (nnz_feature, num_rel_data)
+    The algorithm used is based on https://github.com/xmc-aalto/bonsai.
+
+    Args:
+        y (sparse.csr_matrix): A 0/1 matrix with dimensions number of instances * number of classes.
+        x (sparse.csr_matrix): A matrix with dimensions number of instances * number of features.
+        options (str): The option string passed to liblinear.
+        K (int, optional): Maximum degree of nodes in the tree. Defaults to 100.
+        dmax (int, optional): Maximum depth of the tree. Defaults to 10.
+        verbose (bool, optional): Output extra progress information. Defaults to True.
+    """
+    label_representation = (y.T * x).tocsr()
+    label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
+    root = _build_tree(
+        label_representation, np.arange(y.shape[1]), cluster, 0, K, dmax)
+
+    num_nodes = 0
+
+    def count(node):
+        nonlocal num_nodes
+        num_nodes += 1
+
+    root.dfs(count)
+
+    pbar = tqdm(total=num_nodes, disable=not verbose, ncols=79)
+
+    def visit(node, depth):
+        node.depth = depth
+        # relexvant_instances = y[:, node.label_map].getnnz(axis=1) > 0
+        # x[relevant_instances].nonzero()[1] extracts the column indices with nz elements
+        # node.num_nnz_feat = np.unique(x[relevant_instances].nonzero()[1]).shape[0]
+        # node.num_nnz_feat = np.count_nonzero(x[relevant_instances].sum(axis=0))
+        # node.num_rel_data = np.count_nonzero(relevant_instances)
+        
+        node.num_nnz_feat = np.count_nonzero(label_representation[node.label_map,:].sum(axis=0))
+        pbar.update()
+
+    root.dfs(visit, 0)
+    pbar.close()
+    
+    return root
