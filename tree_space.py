@@ -4,6 +4,7 @@ import json
 from argparse import ArgumentParser
 
 import numpy as np
+import matplotlib.pyplot as plt
 
 import libmultilabel.linear as linear
 from libmultilabel.linear import Node
@@ -24,6 +25,7 @@ parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--clip_depth", type=int, default=10,
                     help="specify the depth you want to compute the model size")
 parser.add_argument("--verbose", action="store_true")
+parser.add_argument("--plot_alphas", action="store_true")
 args = parser.parse_args()
 
 sanity_check = False
@@ -93,13 +95,13 @@ def clip_tree(tree_root_dir, dataset_name, K, dmax, cluster, seed, clip_depth):
 def get_depthwise_stat(root, clip_depth):
     stat = dict()
 
-    for d in range(args.dmax+5):
+    for d in range(args.dmax+2):
         stat[d] = {
             "num_labels": [],
             "num_nnz_feats": [],
             "num_children": [],  # number of internal child nodes
             "num_branches": [],  # number of classifiers to train
-            # "num_nnz_feats_alpha": [],
+            "alphas": [],
             # "num_rel_data_alpha": [],
         }
 
@@ -145,6 +147,9 @@ def get_depthwise_stat(root, clip_depth):
             stat[node.depth]["num_branches"].append(len(node.label_map))
         else:
             stat[node.depth]["num_branches"].append(len(node.children))
+            for child in node.children:
+                stat[node.depth+1]["alphas"].append(
+                    child.num_nnz_feat/node.num_nnz_feat)
 
     root.dfs(collect_stat)
 
@@ -184,6 +189,54 @@ def get_tree_OVR_size_ratio(stat, tree_depth):
     return get_nnz_for_tree_model(stat, tree_depth)*1.5 / (n*L)
 
 
+def get_depthwise_weighted_alphas(stat, tree_depth):
+    avg_alphas = [1, ]
+    for d in range(1, tree_depth):
+        alphas = np.array(stat[d]["alphas"])
+        n_model = np.array(stat[d]["num_branches"])
+        avg_alpha = np.dot(alphas, n_model) / np.sum(n_model)
+        avg_alphas.append(avg_alpha)
+
+    return avg_alphas
+
+
+def plot_alphas(stat, tree_depth, dataset_name, K, seed):
+    avg_alphas = get_depthwise_weighted_alphas(stat, tree_depth)
+    fig, axs = plt.subplots(1, tree_depth-1, figsize=[3*(tree_depth-1), 3.5])
+        
+    for d in range(1, tree_depth):
+        alphas = stat[d]["alphas"]
+        if tree_depth > 2:
+            axs[d-1].hist(alphas, bins=np.arange(0, 1, 0.02), log=True)
+            axs[d-1].set_xlabel(f'Value of $\\alpha$ for depth-{d}', fontsize=12)
+            if d == 1:
+                axs[d-1].set_ylabel("Count", fontsize=12)
+        else:
+            axs.hist(alphas, bins=np.arange(0, 1, 0.02), log=True)
+            axs.set_xlabel(f'Value of $\\alpha$ for depth-{d}', fontsize=12)
+            if d == 1:
+                axs.set_ylabel("Count", fontsize=12)
+        
+        textstr = \
+            f'$\\bar{{\\alpha}}$ = {avg_alphas[d]:.4f} '
+        props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+
+        if tree_depth > 2:
+            axs[d-1].text(0.95, 0.9, textstr, 
+                transform=axs[d-1].transAxes, horizontalalignment='right',
+                bbox=props,
+                fontsize=14)
+        else:
+            axs.text(0.95, 0.9, textstr, 
+                transform=axs.transAxes, horizontalalignment='right',
+                bbox=props,
+                fontsize=14)
+
+
+    # fig.suptitle(name_dict[dataset_name], fontsize=20)
+    fig.tight_layout()
+    fig.savefig(f"figs/alphas-plot-{dataset_name}-K{K}-seed{seed}.png")
+
 
 # build tree
 if args.mode == 'all' or args.mode == 'build_tree':
@@ -204,7 +257,8 @@ if args.mode == 'all' or args.mode == 'load_tree':
     results = {"ratio": [], 
                "model_size": [], 
                "nr_unfinished_nodes": [], 
-               "nr_unfinished_labels":[],
+               "nr_unfinished_labels": [],
+               "avg_alphas": []
                }
     for seed in sorted(seeds):
         root = load_tree(args.tree_root_dir, args.dataset,
@@ -217,7 +271,10 @@ if args.mode == 'all' or args.mode == 'load_tree':
             if _ > args.K:
                 sum_labels += _
         tree_OVR_size_ratio = get_tree_OVR_size_ratio(stat, tree_depth)
-
+        
+        avg_alphas = get_depthwise_weighted_alphas(stat, tree_depth)
+        if args.plot_alphas:
+            plot_alphas(stat, tree_depth, args.dataset, args.K, seed)
 
         n = stat[0]["num_nnz_feats"][0]
         L = stat[0]["num_labels"][0]
@@ -227,6 +284,7 @@ if args.mode == 'all' or args.mode == 'load_tree':
         results["nr_unfinished_nodes"].append(
             int(np.count_nonzero(leafs > args.K)))
         results["nr_unfinished_labels"].append(int(sum_labels))
+        results["avg_alphas"].append(avg_alphas)
 
         if args.verbose:
             print("\n")
@@ -235,6 +293,7 @@ if args.mode == 'all' or args.mode == 'load_tree':
             print("# leaves with > K labels:", np.count_nonzero(leafs > args.K))
             print("# labels in nodes with > K labels", sum_labels)
             print("larger than 1:", np.count_nonzero(leafs > 1))
+            print(f"Average layerwise alphas: {[round(a, 4) for a in avg_alphas]}")
             print(f"seed {seed} size ratio: {tree_OVR_size_ratio:.5f}")
 
     avg_tree_model_size = \
@@ -253,7 +312,6 @@ if args.mode == 'clip_tree':
     tree_files = [filename for filename in os.listdir(args.tree_root_dir)
                   if filename.startswith(
                   f"{args.dataset}_{args.cluster}_d{args.dmax}_K{args.K}")]
-    # if args.dataset in filename and str(args.K) in filename]
     print(tree_files)
     seeds = [int(file.split("seed")[1].split(".")[0]) for file in tree_files]
 
