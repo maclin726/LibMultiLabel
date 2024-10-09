@@ -108,11 +108,11 @@ def gen_varied_K_logs():
                 '--cluster', 'elkan',
                 '--K', str(K), 
                 '--dmax', str(depth), 
+                '--clip_depth', str(depth),
                 dataset[1], dataset[0],
                 'label_tree_obj/bonsai'
             ]
             subprocess.run(cmd)
-            # subprocess.run(cmd, stdout=subprocess.PIPE)
 
 def plot_varied_K(start_d, end_d):
     
@@ -139,7 +139,7 @@ def plot_varied_K(start_d, end_d):
         axs[i].tick_params("y", labelsize=18)
         axs[i].set_title(dataset_name[i], fontsize=25)
         if i == 0:
-            axs[i].set_ylabel("Model-size: Tree / OVR", fontsize=20)
+            axs[i].set_ylabel("Model-size ratio: Tree / OVR", fontsize=20)
         axs[i].set_xlabel('Tree depth', fontsize=20)
         axs[i].grid()
         axs[i].yaxis.set_major_formatter(yticks)
