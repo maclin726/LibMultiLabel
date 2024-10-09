@@ -133,6 +133,7 @@ dmypy.json
 .editorconfig
 .vscode/
 
+figs/*
 dataset/*
 data/*
 output/*

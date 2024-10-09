@@ -1,15 +1,16 @@
 from tqdm import tqdm
 import math
 import libmultilabel.linear as linear
-import time
 import pickle
 import numpy as np
 import os
-import random
+from argparse import ArgumentParser
 
-dataset = 'amazon-670k'
+parser = ArgumentParser()
+parser.add_argument("dataset")
+args = parser.parse_args()
 
-with open(f"data/{dataset}/dataset.pkl", "rb") as f:
+with open(f"data/{args.dataset}/dataset.pkl", "rb") as f:
     datasets = pickle.load(f)
     print("load pickle succeed")
 
@@ -29,22 +30,22 @@ def metrics_in_batches(model):
 
 
 path = 'label_tree_obj/default/'
-thresholds = [0.1,]
+thresholds = [0, 0.1]
 results = dict()
 for thres in thresholds:
     results[thres] = []
 
 tree_names = [
-    f'{dataset}_elkan_d5_K100_seed0', 
-    f'{dataset}_elkan_d5_K100_seed1', 
-    f'{dataset}_elkan_d5_K100_seed2'
+    f'{args.dataset}_elkan_d5_K100_seed0', 
+    f'{args.dataset}_elkan_d5_K100_seed1', 
+    f'{args.dataset}_elkan_d5_K100_seed2'
 ]
 
 for tree_name in tree_names:
     if not os.path.isfile(f"model/{tree_name}_s2_unpruned.pkl"):
         tree_model = linear.train_tree(
             datasets["train"]["y"], datasets["train"]["x"], 
-            options="-s 2 -m 28", path=path+tree_name+'.pkl')
+            options="-s 2 -m 16", path=path+tree_name+'.pkl')
         with open(f'model/{tree_name}_s2_unpruned.pkl', "wb") as f:
             pickle.dump(tree_model, f, protocol=5)
     else:
