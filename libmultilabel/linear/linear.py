@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 
 import numpy as np
 import scipy.sparse as sparse
 from liblinear.liblinearutil import train
+from multiprocessing.pool import Pool
 from tqdm import tqdm
 
 __all__ = [
@@ -111,6 +113,96 @@ def train_1vsrest(
         bias=bias,
         thresholds=0,
         multiclass=multiclass,
+    )
+
+
+def _do_train_parallel(
+    y: sparse.csr_matrix, 
+    x: sparse.csr_matrix, 
+    options: str, 
+    l_start, 
+    l_end
+):
+    num_class = y.shape[1]
+    num_feature = x.shape[1]
+    if num_class != l_end - l_start + 1:
+        print("Warning: # labels is not equal to # of the label subset")
+
+    weights = np.zeros((num_feature, num_class), order="F")
+    # if l_start == 0:
+    #     pbar = tqdm(total=num_class, ncols=79)
+    # print(f"{l_start} ", end='', file=sys.stderr, flush=True)
+    for i in range(num_class):
+        # if l_start == 0:
+        #     if i == 0:
+        #         print("inside the do_train", flush=True)
+        #     pbar.update()
+        yi = y[:, i].toarray().reshape(-1)
+        weights[:, i] = _do_train(2 * yi - 1, x, options).ravel()
+    # print(f"{l_end} ", end='', file=sys.stderr, flush=True)
+
+    # if l_start == 0:
+    #     pbar.close()
+    return {"weights": weights, "l_start": l_start, "l_end": l_end}
+
+
+def train_1vsrest_parallel(
+    y: sparse.csr_matrix, 
+    x: sparse.csr_matrix, 
+    multiclass: bool = False,
+    options: str = "", 
+    verbose: bool = True,
+    pool: Pool = None,
+    n_jobs: int = 1
+) -> FlatModel:
+    """Trains a linear model for multiabel data using a one-vs-rest strategy.
+
+    Args:
+        y (sparse.csr_matrix): A 0/1 matrix with dimensions number of instances * number of classes.
+        x (sparse.csr_matrix): A matrix with dimensions number of instances * number of features.
+        options (str, optional): The option string passed to liblinear. Defaults to ''.
+        verbose (bool, optional): Output extra progress information. Defaults to True.
+
+    Returns:
+        A model which can be used in predict_values.
+    """
+    # Follows the MATLAB implementation at https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/multilabel/
+    x, options, bias = _prepare_options(x, options)
+
+    y = y.tocsc()
+    num_class = y.shape[1]
+    num_feature = x.shape[1]
+    weights = np.zeros((num_feature, num_class), order="F")
+
+    if verbose:
+        logging.info(f"Training one-vs-rest model on {num_class} labels")
+
+    label_range = [int(i*num_class/n_jobs) for i in range(n_jobs+1)]
+
+    args = []
+    for i in range(n_jobs):
+        l_start, l_end = label_range[i], label_range[i+1]
+        args.append((y[:,l_start:l_end], x, options, l_start, l_end-1))
+
+    results = pool.starmap(_do_train_parallel, args)
+
+    for result in results:
+        subset_weight = result["weights"]
+        l_start = result["l_start"]
+        l_end = result["l_end"]
+        for i in range(subset_weight.shape[1]):
+            weights[:,i+l_start] = subset_weight[:,i]
+
+    # for i in tqdm(range(num_class), disable=not verbose):
+    #     yi = y[:, i].toarray().reshape(-1)
+    #     weights[:, i] = _do_train(2 * yi - 1, x, options).ravel()
+
+    return FlatModel(
+        name="1vsrest", 
+        weights=np.asmatrix(weights), 
+        bias=bias, 
+        thresholds=0,
+        multiclass=multiclass
     )
 
 

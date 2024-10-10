@@ -3,13 +3,13 @@ from __future__ import annotations
 from typing import Callable
 
 import pickle
-import matplotlib.pyplot as plt
 
 import numpy as np
 import scipy.sparse as sparse
 import sklearn.cluster
 import sklearn.preprocessing
 from tqdm import tqdm
+from multiprocessing.pool import Pool
 
 from . import linear
 # from . import kmeans
@@ -125,6 +125,7 @@ def train_tree(
     dmax=10,
     verbose: bool = True,
     path: str = None,
+    n_jobs: int = 1
 ) -> tuple[TreeModel, float]:
     """Trains a linear model for multiabel data using a divide-and-conquer strategy.
     The algorithm used is based on https://github.com/xmc-aalto/bonsai.
@@ -161,15 +162,19 @@ def train_tree(
 
     root.dfs(count)
 
-    pbar = tqdm(total=num_nodes, disable=not verbose, ncols=79)
+    with Pool(n_jobs) as pool:
+        pbar = tqdm(total=num_nodes, disable=not verbose, ncols=79)
 
-    def visit(node):
-        relevant_instances = y[:, node.label_map].getnnz(axis=1) > 0
-        _train_node(y[relevant_instances], x[relevant_instances], options, node)
-        pbar.update()
+        def visit(node):
+            # print(f"Visit node: leaf? {node.isLeaf()} child {len(node.children)} nodemap {len(node.label_map)}")
+            relevant_instances = y[:, node.label_map].getnnz(axis=1) > 0
+            _train_node(y[relevant_instances], x[relevant_instances], options, node, pool, n_jobs)
+            pbar.update()
 
-    root.dfs(visit)
-    pbar.close()
+        root.dfs(visit)
+        pbar.close()
+        # pool.terminate()
+        # pool.join()
 
     flat_model, weight_map = _flatten_model(root)
     
@@ -229,7 +234,7 @@ def _build_tree(
     return Node(label_map=label_map, children=children)
 
 
-def _train_node(y: sparse.csr_matrix, x: sparse.csr_matrix, options: str, node: Node):
+def _train_node(y: sparse.csr_matrix, x: sparse.csr_matrix, options: str, node: Node, pool: Pool, n_jobs):
     """If node is internal, computes the metalabels representing each child and trains
     on the metalabels. Otherwise, train on y.
 
@@ -240,15 +245,24 @@ def _train_node(y: sparse.csr_matrix, x: sparse.csr_matrix, options: str, node: 
         node (Node): Node to be trained.
     """
     if node.isLeaf():
-        node.model = linear.train_1vsrest(y[:, node.label_map], x, False, options, False)
+        if len(node.label_map) >= n_jobs:
+            node.model = linear.train_1vsrest_parallel(
+                y[:, node.label_map], x, False, options, True, pool, n_jobs)
+        else:
+            node.model = linear.train_1vsrest(
+                y[:, node.label_map], x, False, options, False)
     else:
         # meta_y[i, j] is 1 if the ith instance is relevant to the jth child.
         # getnnz returns an ndarray of shape number of instances.
         # This must be reshaped into number of instances * 1 to be interpreted as a column.
         meta_y = [y[:, child.label_map].getnnz(axis=1)[:, np.newaxis] > 0 for child in node.children]
         meta_y = sparse.csr_matrix(np.hstack(meta_y))
-        node.model = linear.train_1vsrest(meta_y, x, False, options, False)
-
+        if len(node.children) >= n_jobs:
+            node.model = linear.train_1vsrest_parallel(
+                meta_y, x, False, options, True, pool, n_jobs)
+        else:
+            node.model = linear.train_1vsrest(meta_y, x, False, options, True)
+            
     node.model.weights = sparse.csc_matrix(node.model.weights)
 
 

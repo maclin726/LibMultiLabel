@@ -10,26 +10,6 @@ from tqdm import tqdm
 
 import libmultilabel.linear as linear
 
-parser = ArgumentParser()
-# parser.add_argument("mode",
-#                     choices=['all', 'build_tree', 'load_tree', 'clip_tree'],
-#                     default='all')
-# parser.add_argument("format", help="format")
-parser.add_argument("dataset", help="data set")
-parser.add_argument("tree_root_dir",
-                    help="the directory to store label trees")
-parser.add_argument("--n_cores", type=int, default=32)
-# parser.add_argument("--K", type=int, default=100)
-# parser.add_argument("--dmax", type=int, default=10)
-# parser.add_argument("--cluster", default="elkan",
-#                     choices=["elkan", "balanced_spherical", "random"])
-# parser.add_argument("--seed", type=int, default=0)
-parser.add_argument("--verbose", action="store_true")
-args = parser.parse_args()
-
-with open(f"data/{args.dataset}/dataset.pkl", "rb") as f:
-    datasets = pickle.load(f)
-    print("load pickle succeed")
 
 def metrics_in_batches(model):
     batch_size = 256
@@ -45,47 +25,70 @@ def metrics_in_batches(model):
 
     return metrics.compute()
 
-types = [0, 1, 2, 3, 7]
+if __name__  == "__main__":
+    parser = ArgumentParser()
+    # parser.add_argument("mode",
+    #                     choices=['all', 'build_tree', 'load_tree', 'clip_tree'],
+    #                     default='all')
+    # parser.add_argument("format", help="format")
+    parser.add_argument("dataset", help="data set")
+    parser.add_argument("tree_root_dir",
+                        help="the directory to store label trees")
+    parser.add_argument("--n_cores", type=int, default=8)
+    # parser.add_argument("--K", type=int, default=100)
+    # parser.add_argument("--dmax", type=int, default=10)
+    # parser.add_argument("--cluster", default="elkan",
+    #                     choices=["elkan", "balanced_spherical", "random"])
+    # parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--verbose", action="store_true")
+    args = parser.parse_args()
 
-type2name = {0: "LR primal", 
-             1: "L2   dual",
-             2: "L2 primal",
-             3: "L1   dual",
-             7: "LR   dual"}
+    with open(f"data/{args.dataset}/dataset.pkl", "rb") as f:
+        datasets = pickle.load(f)
+        print("load pickle succeed")
 
-results = {
-    0: [],
-    1: [],
-    2: [],
-    3: [],
-    7: []
-}
 
-tree_names = [
-    f'{args.tree_root_dir}/{args.dataset}_elkan_d10_K100_seed0.pkl', 
-    f'{args.tree_root_dir}/{args.dataset}_elkan_d10_K100_seed1.pkl', 
-    f'{args.tree_root_dir}/{args.dataset}_elkan_d10_K100_seed2.pkl'
-]
+    types = [1, 2, 3]
 
-for tree_name in tree_names:
+    type2name = {0: "LR primal", 
+                1: "L2   dual",
+                2: "L2 primal",
+                3: "L1   dual",
+                7: "LR   dual"}
+
+    results = {
+        0: [],
+        1: [],
+        2: [],
+        3: [],
+        7: []
+    }
+
+    tree_names = [
+        f'{args.tree_root_dir}/{args.dataset}_elkan_d10_K100_seed0.pkl', 
+        # f'{args.tree_root_dir}/{args.dataset}_elkan_d10_K100_seed1.pkl', 
+        # f'{args.tree_root_dir}/{args.dataset}_elkan_d10_K100_seed2.pkl'
+    ]
+
+    for tree_name in tree_names:
+        for type in types:
+            options = f"-s {type} -m 1" if type != 7 else f"-s {type}"
+            tree_model, train_time, model_nnz = linear.train_tree(
+                datasets["train"]["y"], datasets["train"]["x"], 
+                options=options, path=tree_name, n_jobs=8)
+            w_shape = tree_model.flat_model.weights.shape
+            results[type].append(
+                (train_time, model_nnz, model_nnz/(w_shape[0]*w_shape[1])*100))
+            print(f"{args.dataset}\t{type2name[type]}\t" + \
+                f"Time: {train_time:.2f} sec\t" + \
+                f"Sparsity: {model_nnz/(w_shape[0]*w_shape[1])*100:.2f}%")
+
+    print("=============== Summary ===============")
     for type in types:
-        options = f"-s {type} -m {args.n_cores}" if type != 7 else f"-s {type}"
-        tree_model, train_time, model_nnz = linear.train_tree(
-            datasets["train"]["y"], datasets["train"]["x"], 
-            options=options, path=tree_name)
-        w_shape = tree_model.flat_model.weights.shape
-        results[type].append(
-            (train_time, model_nnz, model_nnz/(w_shape[0]*w_shape[1])*100))
+        avg = np.average(np.vstack(results[type]), axis=0)
         print(f"{args.dataset}\t{type2name[type]}\t" + \
-              f"Time: {train_time:.2f} sec\t" + \
-              f"Sparsity: {model_nnz/(w_shape[0]*w_shape[1])*100:.2f}%")
+                f"Time: {avg[0]:.2f} sec\t" + \
+                f"Sparsity: {avg[2]:.2f}%")
 
-print("=============== Summary ===============")
-for type in types:
-    avg = np.average(np.vstack(results[type]), axis=0)
-    print(f"{args.dataset}\t{type2name[type]}\t" + \
-            f"Time: {avg[0]:.2f} sec\t" + \
-            f"Sparsity: {avg[2]:.2f}%")
-
-with open(f"logs/{args.dataset}_solver_compare_default.json", "w") as f:
-    f.writelines(json.dumps(results))
+    with open(f"logs/{args.dataset}_solver_compare_default.json", "w") as f:
+        f.writelines(json.dumps(results))
