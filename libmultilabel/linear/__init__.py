@@ -4,4 +4,4 @@ from .metrics import *
 from .preprocessor import *
 from .tree import *
 from .utils import *
-from .tree_sparse import *
+from .tree_mix import *
