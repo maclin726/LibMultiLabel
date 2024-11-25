@@ -11,7 +11,7 @@ import psutil
 
 from . import linear
 
-__all__ = ["train_tree", "TreeModel"]
+__all__ = ["train_tree", "TreeModel", "Node"]
 
 
 class Node:

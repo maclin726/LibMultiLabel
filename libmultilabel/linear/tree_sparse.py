@@ -3,12 +3,15 @@ import numpy as np
 import scipy.sparse as sparse
 import time
 from tqdm import tqdm
+import pickle
 
 from .tree import Node, TreeModel, _train_node, _flatten_model
 # from .sparse_cluster import SparseKMeans
 
 import numbers
 from sklearn.utils.extmath import row_norms, stable_cumsum
+
+__all__ = ["get_label_tree",]
 
 def check_random_state(seed):
     """Turn seed into a np.random.RandomState instance.
@@ -100,7 +103,7 @@ class SparseKMeans:
                 break
 
             end_iter = time.time()
-            print(f"Time to conduct iteration: {i}", end_iter - start_iter)
+            print(f"Time to conduct iteration {i}: {end_iter - start_iter:.5f}")
 
         return self
 
@@ -223,7 +226,7 @@ def _build_tree_sparse(label_representation: sparse.csr_matrix, label_map: np.nd
             K,
             random_state=np.random.randint(2**31 - 1),
             max_iter=300,
-            tol=0.0001
+            tol=0.0001,
         )
         .fit(label_representation)
         .labels_
@@ -247,6 +250,61 @@ def _build_tree_sparse(label_representation: sparse.csr_matrix, label_map: np.nd
         children.append(child)
 
     return Node(label_map=label_map, children=children)
+
+def get_label_tree(
+    y: sparse.csr_matrix,
+    x: sparse.csr_matrix,
+    options: str = "",
+    K=100,
+    dmax=10,
+    verbose: bool = True,
+) -> Node:
+    """Trains a linear model for multiabel data using a divide-and-conquer strategy.
+    The algorithm used is based on https://github.com/xmc-aalto/bonsai.
+
+    Args:
+        y (sparse.csr_matrix): A 0/1 matrix with dimensions number of instances * number of classes.
+        x (sparse.csr_matrix): A matrix with dimensions number of instances * number of features.
+        options (str): The option string passed to liblinear.
+        K (int, optional): Maximum degree of nodes in the tree. Defaults to 100.
+        dmax (int, optional): Maximum depth of the tree. Defaults to 10.
+        verbose (bool, optional): Output extra progress information. Defaults to True.
+
+    Returns:
+        A model which can be used in predict_values.
+    """
+    label_representation = (y.T * x).tocsr()
+    label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
+
+    # Build a tree
+    # In case the node have more than K labels => it continues to cluster else stop
+    # Note that the number of labels per node is not the same.
+    start = time.time()
+    root = _build_tree_sparse(label_representation, np.arange(y.shape[1]), 0, K, dmax)
+    end = time.time()
+    print("Clustering time: {:10.2f}\n".format(end - start))
+
+    return root
+    # num_nodes = 0
+
+    # def count(node):
+    #     nonlocal num_nodes
+    #     num_nodes += 1
+
+    # root.dfs(count)
+
+    # pbar = tqdm(total=num_nodes, disable=not verbose)
+
+    # def visit(node):
+    #     relevant_instances = y[:, node.label_map].getnnz(axis=1) > 0
+    #     _train_node(y[relevant_instances], x[relevant_instances], options, node)
+    #     pbar.update()
+
+    # root.dfs(visit)
+    # pbar.close()
+
+    # flat_model, weight_map = _flatten_model(root)
+    # return TreeModel(root, flat_model, weight_map)
 
 def train_tree_sparse(
     y: sparse.csr_matrix,
