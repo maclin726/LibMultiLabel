@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+import time
 import numpy as np
 import scipy.sparse as sparse
 import sklearn.cluster
@@ -10,8 +11,9 @@ from tqdm import tqdm
 import psutil
 
 from . import linear
+from . import SparseKMeans, MixSparseKMeans, GraphBLASKMeans
 
-__all__ = ["train_tree", "TreeModel", "Node"]
+__all__ = ["train_tree", "TreeModel", "Node", "get_label_tree"]
 
 
 class Node:
@@ -172,7 +174,46 @@ def train_tree(
     return TreeModel(root, flat_model, weight_map)
 
 
-def _build_tree(label_representation: sparse.csr_matrix, label_map: np.ndarray, d: int, K: int, dmax: int) -> Node:
+def get_label_tree(
+    y: sparse.csr_matrix,
+    x: sparse.csr_matrix,
+    K=100,
+    dmax=10,
+    verbose: bool = True,
+) -> Node:
+    """Trains a linear model for multiabel data using a divide-and-conquer strategy.
+    The algorithm used is based on https://github.com/xmc-aalto/bonsai.
+
+    Args:
+        y (sparse.csr_matrix): A 0/1 matrix with dimensions number of instances * number of classes.
+        x (sparse.csr_matrix): A matrix with dimensions number of instances * number of features.
+        options (str): The option string passed to liblinear.
+        K (int, optional): Maximum degree of nodes in the tree. Defaults to 100.
+        dmax (int, optional): Maximum depth of the tree. Defaults to 10.
+        verbose (bool, optional): Output extra progress information. Defaults to True.
+
+    Returns:
+        A model which can be used in predict_values.
+    """
+    label_representation = (y.T * x).tocsr()
+    label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
+
+    # Build a tree
+    # In case the node have more than K labels => it continues to cluster else stop
+    # Note that the number of labels per node is not the same.
+    start = time.time()
+    root = _build_tree(label_representation, np.arange(y.shape[1]), 0, K, dmax)
+    end = time.time()
+    print("Clustering time: {:10.2f}\n".format(end - start))
+
+    return root
+
+
+def _build_tree(label_representation: sparse.csr_matrix, 
+                label_map: np.ndarray, 
+                d: int, 
+                K: int, 
+                dmax: int) -> Node:
     """Builds the tree recursively by kmeans clustering.
 
     Args:
@@ -188,18 +229,35 @@ def _build_tree(label_representation: sparse.csr_matrix, label_map: np.ndarray, 
     if d >= dmax or label_representation.shape[0] <= K:
         return Node(label_map=label_map, children=[])
 
-    metalabels = (
-        sklearn.cluster.KMeans(
-            K,
-            random_state=np.random.randint(2**31 - 1),
-            n_init=1,
-            max_iter=300,
-            tol=0.0001,
-            algorithm="elkan",
-        )
-        .fit(label_representation)
-        .labels_
+    # kmeans = sklearn.cluster.KMeans(
+    #     K,
+    #     random_state=np.random.randint(2**31 - 1),
+    #     n_init=1,
+    #     max_iter=300,
+    #     tol=0.0001,
+    #     algorithm="elkan",
+    # )
+    # kmeans = SparseKMeans(
+    #     K,
+    #     random_state=np.random.randint(2**31 - 1),
+    #     max_iter=300,
+    #     tol=0.0001,
+    # )
+    # kmeans = MixSparseKMeans(
+    #     d,
+    #     K,
+    #     random_state=np.random.randint(2**31 - 1),
+    #     max_iter=300,
+    #     tol=0.0001
+    # )
+    kmeans = GraphBLASKMeans(
+        K,
+        random_state=np.random.randint(2**31 - 1),
+        max_iter=300,
+        tol=0.0001,
     )
+
+    metalabels = kmeans.fit(label_representation).labels_
 
     children = []
     for i in range(K):

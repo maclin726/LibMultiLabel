@@ -8,7 +8,8 @@ import time
 from tqdm import tqdm
 import sys
 
-from .tree import Node, TreeModel, _train_node, _flatten_model
+# from .tree import Node, TreeModel, _train_node, _flatten_model
+from typing import Tuple
 
 import numbers
 from sklearn.utils.extmath import row_norms, stable_cumsum
@@ -44,13 +45,18 @@ def check_random_state(seed):
 
 
 class MixSparseKMeans:
-    def __init__(self, d, n_clusters=3, max_iter=100, tol=1e-4, random_state=42):
+    def __init__(self,
+                 d, 
+                 n_clusters=3, 
+                 max_iter=100, 
+                 tol=1e-4, 
+                 random_state=42):
         self.n_clusters = n_clusters
         self.max_iter = max_iter
         self.tol = tol
         self.centroids = []
         self.random_state = check_random_state(random_state)
-
+        
         self.isDense = False
         self.d = d
 
@@ -85,10 +91,14 @@ class MixSparseKMeans:
             # XC = (2 * X.dot(self.centroids.T))
 
             # Multi-core
-            if self.isDense:        
+            if self.isDense:
+                X_csr.indices = X_csr.indices.copy()
+                self.centroids = self.centroids.copy()
                 XC = 2 * sdm.dot_product_mkl(X_csr, self.centroids.T, dense=True)
                 distances_to_clusters = x_squared_norms[:, np.newaxis] - XC + c_squared_norms[np.newaxis, :]
             else:
+                X.indices = X.indices.copy()
+                self.centroids = self.centroids.copy()
                 XC = 2 * sdm.dot_product_mkl(X, self.centroids.T, dense=False)
                 distances_to_clusters = x_squared_norms[:, np.newaxis] - XC.A + c_squared_norms[np.newaxis, :]
             
@@ -101,7 +111,7 @@ class MixSparseKMeans:
             # If self.isDense True, we save the centroids in dense format (need to convert from the )
             old_centroids = self.centroids
             # self.centroids, mask = self._update_centroids(X_csr, labels)
-            self.centroids, mask = self._update_centroids(X_csr, labels)
+            self.centroids, mask = self._update_centroids_fixsegment(X_csr, labels)
 
             # check centroids_sparsity to consider which format should be use
             if i == 0 and self.d == 0:
@@ -128,7 +138,11 @@ class MixSparseKMeans:
 
         return self
 
-    def _init_centroids(self, X, x_squared_norms, random_state, sample_weight=None):
+    def _init_centroids(self, 
+                        X, 
+                        x_squared_norms, 
+                        random_state, 
+                        sample_weight=None) -> Tuple[sparse.csr_matrix, np.ndarray]:
         """
         Old version for _init_centroids
         """
@@ -179,7 +193,8 @@ class MixSparseKMeans:
             # The scipy performance on these 2 operation is difference, possibly due to the loop for columns in latter matrix
             candidates = X[candidate_ids]
             # distance_to_candidates = x_squared_norms[:, np.newaxis] - (2 * X_csc.dot(candidates.T)).A + x_squared_norms[candidate_ids][np.newaxis, :]
-
+            X_csc.indices = X_csc.indices.copy()
+            candidates.indices = candidates.indices.copy()
             distance_to_candidates = x_squared_norms[:, np.newaxis] - 2 * sdm.dot_product_mkl(X_csc, candidates.T).A + x_squared_norms[candidate_ids][np.newaxis, :]
             distance_to_candidates = distance_to_candidates.T
 
@@ -227,6 +242,7 @@ class MixSparseKMeans:
 
         # Scikit-learn Kmeans++ (Greedy Kmeans++) (Able to reproduce results from K-means Scikit-learn)
 
+        # Initialize list of closest distances and calculate current potential
         # closest_dist_sq = x_squared_norms[indices[0]] - (2 * X[centroid_id].dot(X.T)).A + x_squared_norms
         closest_dist_sq = x_squared_norms[indices[0]] - 2 * sdm.dot_product_mkl(X[centroid_id], (X.T)).A + x_squared_norms
         current_pot = closest_dist_sq @ sample_weight
@@ -240,7 +256,6 @@ class MixSparseKMeans:
             # Choose center candidates by sampling with probability proportional
             # to the squared distance to the closest existing center
             rand_vals = random_state.uniform(size=n_local_trials) * current_pot
-
             candidate_ids = np.searchsorted(
                 stable_cumsum(sample_weight * closest_dist_sq), rand_vals
             )
@@ -278,7 +293,7 @@ class MixSparseKMeans:
             indices[c] = best_candidate
 
             end_iter = time.time()
-            print(f"Time to init iteration: {i}", end_iter - start_iter)
+            # print(f"Time to init iteration: {i}", end_iter - start_iter)
 
         return vstack(centroids), indices
 
@@ -332,99 +347,64 @@ class MixSparseKMeans:
         return 
 
 
-def _build_tree_mix(label_representation: sparse.csr_matrix, label_map: np.ndarray, d: int, K: int, dmax: int, exec_dict: dict, counter_dict: dict) -> Node:
-    """Builds the tree recursively by kmeans clustering.
+# def _build_tree_mix(label_representation: sparse.csr_matrix, label_map: np.ndarray, d: int, K: int, dmax: int, exec_dict: dict, counter_dict: dict) -> Node:
+#     """Builds the tree recursively by kmeans clustering.
 
-    Args:
-        label_representation (sparse.csr_matrix): A matrix with dimensions number of classes under this node * number of features.
-        label_map (np.ndarray): Maps 0..label_representation.shape[0] to the original label indices.
-        d (int): Current depth.
-        K (int): Maximum degree of nodes in the tree.
-        dmax (int): Maximum depth of the tree.
+#     Args:
+#         label_representation (sparse.csr_matrix): A matrix with dimensions number of classes under this node * number of features.
+#         label_map (np.ndarray): Maps 0..label_representation.shape[0] to the original label indices.
+#         d (int): Current depth.
+#         K (int): Maximum degree of nodes in the tree.
+#         dmax (int): Maximum depth of the tree.
 
-    Returns:
-        Node: root of the (sub)tree built from label_representation.
-    """
-    samples = label_representation.shape[0]
+#     Returns:
+#         Node: root of the (sub)tree built from label_representation.
+#     """
+#     samples = label_representation.shape[0]
 
-    if d >= dmax or samples <= K:
-        return Node(label_map=label_map, children=[])
+#     if d >= dmax or samples <= K:
+#         return Node(label_map=label_map, children=[])
 
-    # stack_size = len(inspect.stack())
-    # print(f"Current stack size: {stack_size} frames, Approx. Memory: {stack_size * sys.getsizeof(n)} bytes")
+#     # stack_size = len(inspect.stack())
+#     # print(f"Current stack size: {stack_size} frames, Approx. Memory: {stack_size * sys.getsizeof(n)} bytes")
 
-    start = time.time()
-    metalabels = (
-        MixSparseKMeans(
-            d,
-            K,
-            random_state=np.random.randint(2**31 - 1),
-            max_iter=300,
-            tol=0.0001
-        )
-        .fit(label_representation)
-        .labels_
-    )
-    # metalbales should be np.ndarray
-    end = time.time()
+#     start = time.time()
+#     metalabels = (
+#         MixSparseKMeans(
+#             d,
+#             K,
+#             random_state=np.random.randint(2**31 - 1),
+#             max_iter=300,
+#             tol=0.0001
+#         )
+#         .fit(label_representation)
+#         .labels_
+#     )
+#     # metalbales should be np.ndarray
+#     end = time.time()
     
-    exec_time = end - start
-    print(f"Total time for clustering node at level {d}: ", exec_time)
-    if d not in exec_dict:
-        exec_dict[d] = 0
+#     exec_time = end - start
+#     print(f"Total time for clustering node at level {d}: ", exec_time)
+#     if d not in exec_dict:
+#         exec_dict[d] = 0
 
-    if d not in counter_dict:
-        counter_dict[d] = []
+#     if d not in counter_dict:
+#         counter_dict[d] = []
 
-    exec_dict[d] += exec_time
-    counter_dict[d].append(samples)
+#     exec_dict[d] += exec_time
+#     counter_dict[d].append(samples)
 
-    children = []
-    for i in range(K):
-        # Why indexing cause numpy.matrix
-        child_representation = label_representation[metalabels == i]
-        child_map = label_map[metalabels == i]
+#     children = []
+#     for i in range(K):
+#         # Why indexing cause numpy.matrix
+#         child_representation = label_representation[metalabels == i]
+#         child_map = label_map[metalabels == i]
 
-        # if d == 0 and child_representation.shape[0] > 100:
-        #     # Save the CSR matrix to a .npz file
-        #     sparse.save_npz(f'./data/extract/child_representation_{child_representation.shape[0]}_{i}.npz', child_representation)
+#         # if d == 0 and child_representation.shape[0] > 100:
+#         #     # Save the CSR matrix to a .npz file
+#         #     sparse.save_npz(f'./data/extract/child_representation_{child_representation.shape[0]}_{i}.npz', child_representation)
             
-        child = _build_tree_mix(child_representation, child_map, d + 1, K, dmax, exec_dict, counter_dict)
-        children.append(child)
+#         child = _build_tree_mix(child_representation, child_map, d + 1, K, dmax, exec_dict, counter_dict)
+#         children.append(child)
 
-    return Node(label_map=label_map, children=children)
-
-def get_label_tree(
-    y: sparse.csr_matrix,
-    x: sparse.csr_matrix,
-    options: str = "",
-    K=100,
-    dmax=10,
-    verbose: bool = True,
-) -> Node:
-    """Trains a linear model for multiabel data using a divide-and-conquer strategy.
-    The algorithm used is based on https://github.com/xmc-aalto/bonsai.
-
-    Args:
-        y (sparse.csr_matrix): A 0/1 matrix with dimensions number of instances * number of classes.
-        x (sparse.csr_matrix): A matrix with dimensions number of instances * number of features.
-        options (str): The option string passed to liblinear.
-        K (int, optional): Maximum degree of nodes in the tree. Defaults to 100.
-        dmax (int, optional): Maximum depth of the tree. Defaults to 10.
-        verbose (bool, optional): Output extra progress information. Defaults to True.
-
-    Returns:
-        A model which can be used in predict_values.
-    """
-    label_representation = (y.T * x).tocsr()
-    label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
-
-    # Build a tree
-    # In case the node have more than K labels => it continues to cluster else stop
-    # Note that the number of labels per node is not the same.
-    start = time.time()
-    root = _build_tree_mix(label_representation, np.arange(y.shape[1]), 0, K, dmax)
-    end = time.time()
-    print("Clustering time: {:10.2f}\n".format(end - start))
-
-    return root
+#     return Node(label_map=label_map, children=children)

@@ -11,7 +11,7 @@ import time
 from tqdm import tqdm
 import sys
 
-from .tree import TreeModel, _train_node, _flatten_model
+# from .tree import TreeModel, _train_node, _flatten_model
 # from .sparse_cluster import SparseKMeans
 
 import numbers
@@ -110,6 +110,18 @@ class GraphBLASKMeans:
 
             start_iter = time.time()
             # Step 1: Assign clusters
+
+            # gb.ss.config["burble"] = True
+            # XC = Matrix(dtypes.FP64, nrows=samples, ncols=self.n_clusters)
+            # if self.isDense:
+            #     XC << 0
+            #     XC(accum=gb.binary.plus) << X.mxm(self.centroids.T)
+            # else:
+            #     XC << X.mxm(self.centroids.T) # mxm
+
+            # XC = 2 * XC.to_dense(fill_value=0)
+            # gb.ss.config["burble"] = False
+
             XC = Matrix(dtypes.FP64, nrows=samples, ncols=self.n_clusters)
             XC << X.mxm(self.centroids.T)        # mxm
             XC = 2 * XC.to_dense(fill_value=0)
@@ -237,7 +249,7 @@ class GraphBLASKMeans:
         for i in range(self.n_clusters):
             idx = np.where(labels == i)[0]
             if len(idx) > 0:
-                binary_matrix[i][idx] = 1 / len(idx)tr
+                binary_matrix[i][idx] = 1 / len(idx)
             else:
                 mask[i] = 0
 
@@ -246,7 +258,11 @@ class GraphBLASKMeans:
         # Calculating new centroids
         binary_matrix = Matrix.from_dense(binary_matrix, missing_value=0)
         centroids = Matrix(dtypes.FP64, nrows=self.n_clusters, ncols=n_features)
-        centroids << binary_matrix.mxm(X)
+        # if self.isDense:
+        #     centroids << 0
+        #     centroids(accum=gb.binary.plus) << binary_matrix.mxm(X)
+        # else:
+        #     centroids << binary_matrix.mxm(X)
 
         # Check whether the dense flag is to convert the centroid to Full format
         if self.isDense:
@@ -280,59 +296,59 @@ class GraphBLASKMeans:
         return 
 
 
-def _build_tree_graphblas(label_representation: sparse.csr_matrix, label_map: np.ndarray,
-                                  d: int, K: int, dmax: int, exec_dict: dict, counter_dict: dict, density_dict: dict) -> Node:
-    """Builds the tree recursively by kmeans clustering.
+# def _build_tree_graphblas(label_representation: sparse.csr_matrix, label_map: np.ndarray,
+#                                   d: int, K: int, dmax: int, exec_dict: dict, counter_dict: dict, density_dict: dict) -> Node:
+#     """Builds the tree recursively by kmeans clustering.
 
-    Args:
-        label_representation (sparse.csr_matrix): A matrix with dimensions number of classes under this node * number of features.
-        label_map (np.ndarray): Maps 0..label_representation.shape[0] to the original label indices.
-        d (int): Current depth.
-        K (int): Maximum degree of nodes in the tree.
-        dmax (int): Maximum depth of the tree.
+#     Args:
+#         label_representation (sparse.csr_matrix): A matrix with dimensions number of classes under this node * number of features.
+#         label_map (np.ndarray): Maps 0..label_representation.shape[0] to the original label indices.
+#         d (int): Current depth.
+#         K (int): Maximum degree of nodes in the tree.
+#         dmax (int): Maximum depth of the tree.
 
-    Returns:
-        Node: root of the (sub)tree built from label_representation.
-    """
-    samples = label_representation.shape[0]
+#     Returns:
+#         Node: root of the (sub)tree built from label_representation.
+#     """
+#     samples = label_representation.shape[0]
 
-    if d >= dmax or samples <= K:
-        return Node(label_map=label_map, children=[], depth = d)
+#     if d >= dmax or samples <= K:
+#         return Node(label_map=label_map, children=[], depth = d)
 
-    start = time.time()
+#     start = time.time()
 
-    kmeans = GraphBLASKMeans(
-        K,
-        random_state=np.random.randint(2**31 - 1),
-        max_iter=300,
-        tol=0.0001,
-        )
-    kmeans.fit(label_representation)
-    metalabels = kmeans.labels_
+#     kmeans = GraphBLASKMeans(
+#         K,
+#         random_state=np.random.randint(2**31 - 1),
+#         max_iter=300,
+#         tol=0.0001,
+#         )
+#     kmeans.fit(label_representation)
+#     metalabels = kmeans.labels_
 
-    end = time.time()
+#     end = time.time()
     
-    exec_time = end - start
-    print(f"Total time for clustering node at level {d}: ", exec_time)
-    if d not in exec_dict:
-        exec_dict[d] = 0
+#     exec_time = end - start
+#     print(f"Total time for clustering node at level {d}: ", exec_time)
+#     if d not in exec_dict:
+#         exec_dict[d] = 0
 
-    if d not in counter_dict:
-        counter_dict[d] = []
+#     if d not in counter_dict:
+#         counter_dict[d] = []
 
-    if d not in density_dict:
-        density_dict[d] = []
+#     if d not in density_dict:
+#         density_dict[d] = []
 
-    exec_dict[d] += exec_time
-    counter_dict[d].append(samples)
-    density_dict[d].append(kmeans.density_)
+#     exec_dict[d] += exec_time
+#     counter_dict[d].append(samples)
+#     density_dict[d].append(kmeans.density_)
 
-    children = []
-    for i in range(K):
-        child_representation = label_representation[metalabels == i]
-        child_map = label_map[metalabels == i]
+#     children = []
+#     for i in range(K):
+#         child_representation = label_representation[metalabels == i]
+#         child_map = label_map[metalabels == i]
             
-        child = _build_tree_graphblas(child_representation, child_map, d + 1, K, dmax, exec_dict, counter_dict, density_dict)
-        children.append(child)
+#         child = _build_tree_graphblas(child_representation, child_map, d + 1, K, dmax, exec_dict, counter_dict, density_dict)
+#         children.append(child)
 
-    return Node(label_map=label_map, children=children, depth=d)
+#     return Node(label_map=label_map, children=children, depth=d)

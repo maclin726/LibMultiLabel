@@ -5,13 +5,12 @@ import time
 from tqdm import tqdm
 import pickle
 
-from .tree import Node, TreeModel, _train_node, _flatten_model
+# from .tree import Node, TreeModel, _train_node, _flatten_model
 # from .sparse_cluster import SparseKMeans
 
 import numbers
 from sklearn.utils.extmath import row_norms, stable_cumsum
 
-__all__ = ["get_label_tree",]
 
 def check_random_state(seed):
     """Turn seed into a np.random.RandomState instance.
@@ -204,158 +203,104 @@ class SparseKMeans:
         return 
 
 
-def _build_tree_sparse(label_representation: sparse.csr_matrix, label_map: np.ndarray, d: int, K: int, dmax: int) -> Node:
-    """Builds the tree recursively by kmeans clustering.
+# def _build_tree_sparse(label_representation: sparse.csr_matrix, label_map: np.ndarray, d: int, K: int, dmax: int) -> Node:
+#     """Builds the tree recursively by kmeans clustering.
 
-    Args:
-        label_representation (sparse.csr_matrix): A matrix with dimensions number of classes under this node * number of features.
-        label_map (np.ndarray): Maps 0..label_representation.shape[0] to the original label indices.
-        d (int): Current depth.
-        K (int): Maximum degree of nodes in the tree.
-        dmax (int): Maximum depth of the tree.
+#     Args:
+#         label_representation (sparse.csr_matrix): A matrix with dimensions number of classes under this node * number of features.
+#         label_map (np.ndarray): Maps 0..label_representation.shape[0] to the original label indices.
+#         d (int): Current depth.
+#         K (int): Maximum degree of nodes in the tree.
+#         dmax (int): Maximum depth of the tree.
 
-    Returns:
-        Node: root of the (sub)tree built from label_representation.
-    """
-    if d >= dmax or label_representation.shape[0] <= K:
-        return Node(label_map=label_map, children=[])
+#     Returns:
+#         Node: root of the (sub)tree built from label_representation.
+#     """
+#     if d >= dmax or label_representation.shape[0] <= K:
+#         return Node(label_map=label_map, children=[])
 
-    start = time.time()
-    metalabels = (
-        SparseKMeans(
-            K,
-            random_state=np.random.randint(2**31 - 1),
-            max_iter=300,
-            tol=0.0001,
-        )
-        .fit(label_representation)
-        .labels_
-    )
-    # metalbales should be np.ndarray
-    end = time.time()
-    if d == 1:
-        print(f"Total time for clustering node at level {d}: ", end - start)
+#     start = time.time()
+#     metalabels = (
+#         SparseKMeans(
+#             K,
+#             random_state=np.random.randint(2**31 - 1),
+#             max_iter=300,
+#             tol=0.0001,
+#         )
+#         .fit(label_representation)
+#         .labels_
+#     )
+#     # metalbales should be np.ndarray
+#     end = time.time()
+#     if d == 1:
+#         print(f"Total time for clustering node at level {d}: ", end - start)
 
-    children = []
-    for i in range(K):
-        # Why indexing cause numpy.matrix
-        child_representation = label_representation[metalabels == i]
-        child_map = label_map[metalabels == i]
+#     children = []
+#     for i in range(K):
+#         # Why indexing cause numpy.matrix
+#         child_representation = label_representation[metalabels == i]
+#         child_map = label_map[metalabels == i]
 
-        # if d == 0 and child_representation.shape[0] > 100:
-        #     # Save the CSR matrix to a .npz file
-        #     sparse.save_npz(f'./data/extract/child_representation_{child_representation.shape[0]}_{i}.npz', child_representation)
+#         # if d == 0 and child_representation.shape[0] > 100:
+#         #     # Save the CSR matrix to a .npz file
+#         #     sparse.save_npz(f'./data/extract/child_representation_{child_representation.shape[0]}_{i}.npz', child_representation)
             
-        child = _build_tree_sparse(child_representation, child_map, d + 1, K, dmax)
-        children.append(child)
+#         child = _build_tree_sparse(child_representation, child_map, d + 1, K, dmax)
+#         children.append(child)
 
-    return Node(label_map=label_map, children=children)
+#     return Node(label_map=label_map, children=children)
 
-def get_label_tree(
-    y: sparse.csr_matrix,
-    x: sparse.csr_matrix,
-    options: str = "",
-    K=100,
-    dmax=10,
-    verbose: bool = True,
-) -> Node:
-    """Trains a linear model for multiabel data using a divide-and-conquer strategy.
-    The algorithm used is based on https://github.com/xmc-aalto/bonsai.
 
-    Args:
-        y (sparse.csr_matrix): A 0/1 matrix with dimensions number of instances * number of classes.
-        x (sparse.csr_matrix): A matrix with dimensions number of instances * number of features.
-        options (str): The option string passed to liblinear.
-        K (int, optional): Maximum degree of nodes in the tree. Defaults to 100.
-        dmax (int, optional): Maximum depth of the tree. Defaults to 10.
-        verbose (bool, optional): Output extra progress information. Defaults to True.
+# def train_tree_sparse(
+#     y: sparse.csr_matrix,
+#     x: sparse.csr_matrix,
+#     options: str = "",
+#     K=100,
+#     dmax=10,
+#     verbose: bool = True,
+# ) -> TreeModel:
+#     """Trains a linear model for multiabel data using a divide-and-conquer strategy.
+#     The algorithm used is based on https://github.com/xmc-aalto/bonsai.
 
-    Returns:
-        A model which can be used in predict_values.
-    """
-    label_representation = (y.T * x).tocsr()
-    label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
+#     Args:
+#         y (sparse.csr_matrix): A 0/1 matrix with dimensions number of instances * number of classes.
+#         x (sparse.csr_matrix): A matrix with dimensions number of instances * number of features.
+#         options (str): The option string passed to liblinear.
+#         K (int, optional): Maximum degree of nodes in the tree. Defaults to 100.
+#         dmax (int, optional): Maximum depth of the tree. Defaults to 10.
+#         verbose (bool, optional): Output extra progress information. Defaults to True.
 
-    # Build a tree
-    # In case the node have more than K labels => it continues to cluster else stop
-    # Note that the number of labels per node is not the same.
-    start = time.time()
-    root = _build_tree_sparse(label_representation, np.arange(y.shape[1]), 0, K, dmax)
-    end = time.time()
-    print("Clustering time: {:10.2f}\n".format(end - start))
+#     Returns:
+#         A model which can be used in predict_values.
+#     """
+#     label_representation = (y.T * x).tocsr()
+#     label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
 
-    return root
-    # num_nodes = 0
+#     # Build a tree
+#     # In case the node have more than K labels => it continues to cluster else stop
+#     # Note that the number of labels per node is not the same.
+#     start = time.time()
+#     root = _build_tree_sparse(label_representation, np.arange(y.shape[1]), 0, K, dmax)
+#     end = time.time()
+#     print("Clustering time: {:10.2f}\n".format(end - start))
 
-    # def count(node):
-    #     nonlocal num_nodes
-    #     num_nodes += 1
+#     num_nodes = 0
 
-    # root.dfs(count)
+#     def count(node):
+#         nonlocal num_nodes
+#         num_nodes += 1
 
-    # pbar = tqdm(total=num_nodes, disable=not verbose)
+#     root.dfs(count)
 
-    # def visit(node):
-    #     relevant_instances = y[:, node.label_map].getnnz(axis=1) > 0
-    #     _train_node(y[relevant_instances], x[relevant_instances], options, node)
-    #     pbar.update()
+#     pbar = tqdm(total=num_nodes, disable=not verbose)
 
-    # root.dfs(visit)
-    # pbar.close()
+#     def visit(node):
+#         relevant_instances = y[:, node.label_map].getnnz(axis=1) > 0
+#         _train_node(y[relevant_instances], x[relevant_instances], options, node)
+#         pbar.update()
 
-    # flat_model, weight_map = _flatten_model(root)
-    # return TreeModel(root, flat_model, weight_map)
+#     root.dfs(visit)
+#     pbar.close()
 
-def train_tree_sparse(
-    y: sparse.csr_matrix,
-    x: sparse.csr_matrix,
-    options: str = "",
-    K=100,
-    dmax=10,
-    verbose: bool = True,
-) -> TreeModel:
-    """Trains a linear model for multiabel data using a divide-and-conquer strategy.
-    The algorithm used is based on https://github.com/xmc-aalto/bonsai.
-
-    Args:
-        y (sparse.csr_matrix): A 0/1 matrix with dimensions number of instances * number of classes.
-        x (sparse.csr_matrix): A matrix with dimensions number of instances * number of features.
-        options (str): The option string passed to liblinear.
-        K (int, optional): Maximum degree of nodes in the tree. Defaults to 100.
-        dmax (int, optional): Maximum depth of the tree. Defaults to 10.
-        verbose (bool, optional): Output extra progress information. Defaults to True.
-
-    Returns:
-        A model which can be used in predict_values.
-    """
-    label_representation = (y.T * x).tocsr()
-    label_representation = sklearn.preprocessing.normalize(label_representation, norm="l2", axis=1)
-
-    # Build a tree
-    # In case the node have more than K labels => it continues to cluster else stop
-    # Note that the number of labels per node is not the same.
-    start = time.time()
-    root = _build_tree_sparse(label_representation, np.arange(y.shape[1]), 0, K, dmax)
-    end = time.time()
-    print("Clustering time: {:10.2f}\n".format(end - start))
-
-    num_nodes = 0
-
-    def count(node):
-        nonlocal num_nodes
-        num_nodes += 1
-
-    root.dfs(count)
-
-    pbar = tqdm(total=num_nodes, disable=not verbose)
-
-    def visit(node):
-        relevant_instances = y[:, node.label_map].getnnz(axis=1) > 0
-        _train_node(y[relevant_instances], x[relevant_instances], options, node)
-        pbar.update()
-
-    root.dfs(visit)
-    pbar.close()
-
-    flat_model, weight_map = _flatten_model(root)
-    return TreeModel(root, flat_model, weight_map)
+#     flat_model, weight_map = _flatten_model(root)
+#     return TreeModel(root, flat_model, weight_map)
