@@ -8,7 +8,7 @@ __all__ = ["get_metrics", "compute_metrics", "tabulate_metrics", "MetricCollecti
 
 
 def _argsort_top_k(preds: np.ndarray, top_k: int) -> np.ndarray:
-    """Sort the top k indices in O(n + k log k) time.
+    """Sorts the top k indices in O(n + k log k) time.
     The sorting order is ascending to be consistent with np.sort.
     This means the last element is the largest, the first element is the kth largest.
     """
@@ -18,7 +18,7 @@ def _argsort_top_k(preds: np.ndarray, top_k: int) -> np.ndarray:
 
 
 def _dcg_argsort(argsort_preds: np.ndarray, target: np.ndarray, top_k: int) -> np.ndarray:
-    """Compute DCG@k with a sorted preds array and a target array."""
+    """Computes DCG@k with a sorted preds array and a target array."""
     top_k_idx = argsort_preds[:, -top_k:][:, ::-1]
     gains = np.take_along_axis(target, top_k_idx, axis=-1)
     discount = 1 / (np.log2(np.arange(top_k) + 2))
@@ -28,7 +28,7 @@ def _dcg_argsort(argsort_preds: np.ndarray, target: np.ndarray, top_k: int) -> n
 
 
 def _idcg(target: np.ndarray, top_k: int) -> np.ndarray:
-    """Compute IDCG@k for a 0/1 target array. A 0/1 target is a special case that
+    """Computes IDCG@k for a 0/1 target array. A 0/1 target is a special case that
     doesn't require sorting. If IDCG is computed with DCG,
     then target will need to be sorted, which incurs a large overhead.
     """
@@ -112,6 +112,58 @@ class RPrecisionAtK:
     def reset(self):
         self.score = 0
         self.num_sample = 0
+        
+import numpy as np
+
+class PropensityScoredPrecisionAtK:
+    def __init__(self, top_k, label_pos_counts, N, A=0.55, B=1.5):
+        _check_top_k(top_k)
+        assert label_pos_counts.ndim == 1 and N > 0
+        self.top_k = top_k
+
+        C = (np.log(N) - 1.0) * ((B + 1.0) ** A)
+        prop = 1.0 / (1.0 + C * np.power(label_pos_counts.astype(np.float64) + B, -A))
+        self.inv_propensity = 1.0 / np.clip(prop, 1e-12, None)
+
+        self.num_sum = 0.0   # sum over rows of weighted hits@K / K
+        self.denom_sum = 0.0 # sum over rows of ideal@K / K
+        self.n_rows = 0
+
+    def update(self, preds: np.ndarray, target: np.ndarray):
+        assert preds.shape == target.shape
+        K = self.top_k
+
+        # Top-K by predicted score
+        topk_idx = np.argpartition(preds, -K, axis=1)[:, -K:]
+        y_topk = np.take_along_axis(target, topk_idx, axis=1).astype(np.float64)
+        invp_topk = self.inv_propensity[topk_idx]
+
+        # Numerator: weighted correct@K
+        num = (y_topk * invp_topk).sum(axis=1) / K  # (B,)
+
+        # Denominator: ideal@K = top-K inv-prop among the true labels
+        # Build per-row inv_prop only on true labels
+        true_mask = target.astype(bool)
+        true_invp = np.where(true_mask, self.inv_propensity, -1.0)
+        topk_true = np.partition(true_invp, -K, axis=1)[:, -K:]
+        topk_true = np.clip(topk_true, 0.0, None)      # ignore -1 (non-trues)
+        denom = topk_true.sum(axis=1) / K              # (B,)
+
+        self.num_sum += num.sum()
+        self.denom_sum += denom.sum()
+        self.n_rows += preds.shape[0]
+
+    def compute(self) -> float:
+        if self.n_rows == 0 or self.denom_sum <= 0:
+            return 0.0
+        return float((self.num_sum / self.denom_sum) * 100.0)  # % like xclib
+
+    def reset(self):
+        self.num_sum = 0.0
+        self.denom_sum = 0.0
+        self.n_rows = 0
+
+
 
 
 class PrecisionAtK:
@@ -146,7 +198,7 @@ class PrecisionAtK:
     def reset(self):
         self.score = 0
         self.num_sample = 0
-
+        
 
 class RecallAtK:
     """Compute the Recall@K. Please refer to the `implementation document`
@@ -176,6 +228,58 @@ class RecallAtK:
         self.num_sample += argsort_preds.shape[0]
 
     def compute(self) -> float:
+        return self.score / self.num_sample
+
+    def reset(self):
+        self.score = 0
+        self.num_sample = 0
+
+
+class ZeroShotRecallAtK:
+    def __init__(self, top_k: int, unseen_labels):
+        """
+        Args:
+            top_k: Consider only the top k elements for each query.
+        """
+        _check_top_k(top_k)
+
+        self.top_k = top_k
+        self.score = 0
+        self.num_sample = 0
+        self.unseen_labels = unseen_labels
+
+    def update(self, preds: np.ndarray, target: np.ndarray):
+        assert preds.shape == target.shape  # (batch_size, num_classes)
+        return self.update_argsort(np.argpartition(preds, -self.top_k), target)
+
+    def update_argsort(self, argsort_preds: np.ndarray, target: np.ndarray):
+        top_k_idx = argsort_preds[:, -self.top_k :] # top k indices
+        is_unseen_top_k = np.isin(top_k_idx, self.unseen_labels) # return a true false array
+        # marking the unseen labels in top k
+        num_relevant = \
+            np.logical_and(
+                np.take_along_axis(target, top_k_idx, -1),
+                is_unseen_top_k
+            ).sum(axis=-1).astype(np.float64)
+        
+        # not taking instances with no zero shot labels into account
+        with np.errstate(divide='ignore', invalid='ignore'):
+            self.score += np.nansum(
+                            num_relevant / target[:,self.unseen_labels]
+                            .sum(axis=-1))
+        self.num_sample += \
+            np.count_nonzero(target[:,self.unseen_labels].sum(axis=-1))
+
+        # by convention, recall is 0 for zero label instances
+        # with np.errstate(divide='ignore', invalid='ignore'):
+        #     self.score += np.nan_to_num(
+        #         num_relevant / target[:,self.unseen_labels].sum(axis=-1),
+        #         nan=0.0
+        #     ).sum()
+        # self.num_sample += argsort_preds.shape[0]
+
+    def compute(self) -> float:
+        # print(f"There are {self.num_sample} samples with zero-shot labels.")
         return self.score / self.num_sample
 
     def reset(self):
@@ -247,7 +351,7 @@ class MetricCollection(dict):
         self.max_k = max(getattr(metric, "top_k", 0) for metric in self.metrics.values())
 
     def update(self, preds: np.ndarray, target: np.ndarray):
-        """Add a batch of decision values and labels.
+        """Adds a batch of decision values and labels.
 
         Args:
             preds (np.ndarray): A matrix of decision values with dimensions number of instances * number of classes.
@@ -268,7 +372,7 @@ class MetricCollection(dict):
                 metric.update(preds, target)
 
     def compute(self) -> dict[str, float]:
-        """Compute the metrics from the accumulated batches of decision values and labels.
+        """Computes the metrics from the accumulated batches of decision values and labels.
 
         Returns:
             dict[str, float]: A dictionary of metric values.
@@ -279,12 +383,12 @@ class MetricCollection(dict):
         return ret
 
     def reset(self):
-        """Clear the accumulated batches of decision values and labels."""
+        """Clears the accumulated batches of decision values and labels."""
         for metric in self.metrics.values():
             metric.reset()
 
 
-def get_metrics(monitor_metrics: list[str], num_classes: int, multiclass: bool = False) -> MetricCollection:
+def get_metrics(monitor_metrics: list[str], num_classes: int, unseen_labels=None, label_pos_counts=None, num_instances=None, multiclass: bool = False) -> MetricCollection:
     """Get a collection of metrics by their names.
     See MetricCollection for more details.
 
@@ -304,10 +408,15 @@ def get_metrics(monitor_metrics: list[str], num_classes: int, multiclass: bool =
             metrics[metric] = PrecisionAtK(top_k=int(metric[2:]))
         elif re.match(r"R@\d+", metric):
             metrics[metric] = RecallAtK(top_k=int(metric[2:]))
+        elif re.match(r"ZSR@\d+", metric):
+            metrics[metric] = ZeroShotRecallAtK(
+                top_k=int(metric[4:]), unseen_labels=unseen_labels)
         elif re.match(r"RP@\d+", metric):
             metrics[metric] = RPrecisionAtK(top_k=int(metric[3:]))
         elif re.match(r"NDCG@\d+", metric):
             metrics[metric] = NDCGAtK(top_k=int(metric[5:]))
+        elif re.match(r"PSP@\d+", metric):
+            metrics[metric] = PropensityScoredPrecisionAtK(top_k=int(metric[4:]), label_pos_counts=label_pos_counts, N=num_instances)
         elif metric in {"Another-Macro-F1", "Macro-F1", "Micro-F1"}:
             metrics[metric] = F1(num_classes, average=metric[:-3].lower(), multiclass=multiclass)
         else:
@@ -317,7 +426,9 @@ def get_metrics(monitor_metrics: list[str], num_classes: int, multiclass: bool =
 
 
 def compute_metrics(
-    preds: np.ndarray, target: np.ndarray, monitor_metrics: list[str], multiclass: bool = False
+    preds: np.ndarray, target: np.ndarray, monitor_metrics: list[str],
+    unseen_labels = None, label_pos_counts = None, num_instances = None,
+    multiclass: bool = False
 ) -> dict[str, float]:
     """Compute metrics with decision values and labels.
     See get_metrics and MetricCollection if decision values and labels are too
@@ -335,7 +446,7 @@ def compute_metrics(
     """
     assert preds.shape == target.shape
 
-    metric = get_metrics(monitor_metrics, preds.shape[1], multiclass)
+    metric = get_metrics(monitor_metrics, preds.shape[1], unseen_labels, label_pos_counts, num_instances, multiclass)
     metric.update(preds, target)
     return metric.compute()
 
@@ -351,11 +462,11 @@ def tabulate_metrics(metric_dict: dict[str, float], split: str) -> str:
         str: Pretty formatted string.
     """
     msg = f"====== {split} dataset evaluation result =======\n"
-    header = "|".join([f"{k:^18}" for k in metric_dict.keys()])
+    header = "|".join([f"{k:^10}" for k in metric_dict.keys()])
     values = "|".join(
-        [f"{x:^18.4f}" if isinstance(x, (np.floating, float)) else f"{x:^18}" for x in metric_dict.values()]
+        [f"{x*100:^10.2f}" if isinstance(x, (np.floating, float)) else f"{x*100:^10}" for x in metric_dict.values()]
     )
-    msg += f"|{header}|\n|{'-----------------:|' * len(metric_dict)}\n|{values}|\n"
+    msg += f"|{header}|\n|{'---------:|' * len(metric_dict)}\n|{values}|\n"
     return msg
 
 

@@ -6,6 +6,13 @@ __pycache__/
 # C extensions
 *.so
 
+/ZSLWAN-release/*
+/data/*
+data/eurlex4k_dexml/AttentionXML/*
+/runs/*
+
+./baselines/*
+
 # Distribution / packaging
 .Python
 build/

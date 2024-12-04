@@ -7,3 +7,4 @@ scipy
 tqdm
 psutil
 sparsekmeans
+jupyterlab
