@@ -15,5 +15,10 @@ This is an on-going development so many improvements are still being made. Comme
 
 If you have a different version of CUDA, follow the installation instructions for PyTorch LTS at their [website](https://pytorch.org/).
 
+To build the environment, please excute
+```
+make all
+```
+
 ## Documentation
 See the documentation here: https://www.csie.ntu.edu.tw/~cjlin/libmultilabel
