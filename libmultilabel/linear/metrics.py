@@ -183,6 +183,57 @@ class RecallAtK:
         self.num_sample = 0
 
 
+class ZeroShotRecallAtK:
+    def __init__(self, top_k: int, unseen_labels):
+        """
+        Args:
+            top_k: Consider only the top k elements for each query.
+        """
+        _check_top_k(top_k)
+
+        self.top_k = top_k
+        self.score = 0
+        self.num_sample = 0
+        self.unseen_labels = unseen_labels
+
+    def update(self, preds: np.ndarray, target: np.ndarray):
+        assert preds.shape == target.shape  # (batch_size, num_classes)
+        return self.update_argsort(np.argpartition(preds, -self.top_k), target)
+
+    def update_argsort(self, argsort_preds: np.ndarray, target: np.ndarray):
+        top_k_idx = argsort_preds[:, -self.top_k :]
+        is_unseen_top_k = np.isin(top_k_idx, self.unseen_labels)
+        num_relevant = \
+            np.logical_and(
+                np.take_along_axis(target, top_k_idx, -1),
+                is_unseen_top_k
+            ).sum(axis=-1).astype(np.float64)
+        
+        # not taking instances with no zero shot labels into account
+        with np.errstate(divide='ignore', invalid='ignore'):
+            self.score += np.nansum(
+                            num_relevant / target[:,self.unseen_labels]
+                            .sum(axis=-1))
+        self.num_sample += \
+            np.count_nonzero(target[:,self.unseen_labels].sum(axis=-1))
+
+        # by convention, recall is 0 for zero label instances
+        # with np.errstate(divide='ignore', invalid='ignore'):
+        #     self.score += np.nan_to_num(
+        #         num_relevant / target[:,self.unseen_labels].sum(axis=-1),
+        #         nan=0.0
+        #     ).sum()
+        # self.num_sample += argsort_preds.shape[0]
+
+    def compute(self) -> float:
+        # print(f"There are {self.num_sample} samples with zero-shot labels.")
+        return self.score / self.num_sample
+
+    def reset(self):
+        self.score = 0
+        self.num_sample = 0
+
+
 class F1:
     """Compute the F1 score. Please refer to the `implementation document`
     (https://www.csie.ntu.edu.tw/~cjlin/papers/libmultilabel/libmultilabel_implementation.pdf) for details.
@@ -284,7 +335,7 @@ class MetricCollection(dict):
             metric.reset()
 
 
-def get_metrics(monitor_metrics: list[str], num_classes: int, multiclass: bool = False) -> MetricCollection:
+def get_metrics(monitor_metrics: list[str], num_classes: int, unseen_labels, multiclass: bool = False) -> MetricCollection:
     """Get a collection of metrics by their names.
     See MetricCollection for more details.
 
@@ -304,6 +355,9 @@ def get_metrics(monitor_metrics: list[str], num_classes: int, multiclass: bool =
             metrics[metric] = PrecisionAtK(top_k=int(metric[2:]))
         elif re.match(r"R@\d+", metric):
             metrics[metric] = RecallAtK(top_k=int(metric[2:]))
+        elif re.match(r"ZSR@\d+", metric):
+            metrics[metric] = ZeroShotRecallAtK(
+                top_k=int(metric[4:]), unseen_labels=unseen_labels)
         elif re.match(r"RP@\d+", metric):
             metrics[metric] = RPrecisionAtK(top_k=int(metric[3:]))
         elif re.match(r"NDCG@\d+", metric):
@@ -351,11 +405,11 @@ def tabulate_metrics(metric_dict: dict[str, float], split: str) -> str:
         str: Pretty formatted string.
     """
     msg = f"====== {split} dataset evaluation result =======\n"
-    header = "|".join([f"{k:^18}" for k in metric_dict.keys()])
+    header = "|".join([f"{k:^10}" for k in metric_dict.keys()])
     values = "|".join(
-        [f"{x:^18.4f}" if isinstance(x, (np.floating, float)) else f"{x:^18}" for x in metric_dict.values()]
+        [f"{x*100:^10.2f}" if isinstance(x, (np.floating, float)) else f"{x*100:^10}" for x in metric_dict.values()]
     )
-    msg += f"|{header}|\n|{'-----------------:|' * len(metric_dict)}\n|{values}|\n"
+    msg += f"|{header}|\n|{'---------:|' * len(metric_dict)}\n|{values}|\n"
     return msg
 
 

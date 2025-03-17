@@ -61,8 +61,11 @@ def metrics_in_batches(X, y, predictor, unseen_labels, **kargs_for_predictors):
     num_batches = math.ceil(num_instances / batch_size)
 
     metrics = linear.get_metrics(
-        ["P@1", "P@3", "P@5", "R@10", "R@20", "R@100"], 
-        num_classes=y.shape[1]
+        ["P@1", "P@3", "P@5", 
+         "R@10", "R@20", "R@50",
+         "ZSR@10", "ZSR@20", "ZSR@50"], 
+        num_classes=y.shape[1],
+        unseen_labels=unseen_labels
     )
 
     for i in range(num_batches):
@@ -114,8 +117,8 @@ class MixedPredictor:
 
     def predict_on_all_label(self, x, alpha, beta, proxy_type):
         """
-        Predict the values for all labels based on the unified framework, given
-        as 
+        Predict the values for all labels based on the unified framework,
+        given as
             scores_seen = alpha * s_hat_seen + (1-alpha) * label_doc_sim_seen
             scores_unseen = beta * proxy + (1-beta) * label_doc_sim_unseen
 
@@ -133,6 +136,8 @@ class MixedPredictor:
         preds = np.zeros((x.shape[0], self.all_label_map.shape[0]))
         seen_label_doc_sim = \
             predict_values_by_tfidf(x, self.seen_label_feature)
+        unseen_label_doc_sim = \
+            predict_values_by_tfidf(x, self.unseen_label_feature)
         s_hat_seen = self.predict_values_on_seen_label(x)
         
         preds[:,self.seen_labels] = \
@@ -150,19 +155,15 @@ class MixedPredictor:
             proxy = preds[:,nearest_seen_label] + sign * 1e-8
         elif proxy_type == "avg":
             nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
-            # preds[:,nearest_seen_labels].shape is 
-            # (n_instances, n_unseen labels, n_nearest neighbors)
+            # shape: (n_instances, n_unseen labels, n_nearest neighbors)
             proxy = np.average(preds[:,nearest_seen_labels], axis=2)
         elif proxy_type == "min":
+            # bad performance
             nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
             proxy = np.min(preds[:,nearest_seen_labels], axis=2)
-        # elif proxy_type == "period":
-        #     pass
         else:
             raise ValueError("Unknown proxy type for unseen labels")
 
-        unseen_label_doc_sim = \
-            predict_values_by_tfidf(x, self.unseen_label_feature)
         preds[:,self.unseen_labels] = \
             beta * proxy + (1-beta) * unseen_label_doc_sim
         
@@ -211,11 +212,28 @@ def main():
         model,
         X_label,
     )
+    
+    # a grid search
+    proxy_types = ["insert_closest", "min", "avg"]
+    alphas = [0, 0.25, 0.5, 0.75, 1]
+    betas = [0, 0.25, 0.5, 0.75, 1]
+    for proxy_type in proxy_types:
+        for alpha in alphas:
+            for beta in betas:
+                if alpha < beta:
+                    continue
+                metric_dict = metrics_in_batches(
+                    X_test, y_test, mixed_predictor, unseen_labels,
+                    alpha=alpha, beta=beta, proxy_type=proxy_type)
+                print(linear.tabulate_metrics(
+                        metric_dict, 
+                        f"a={alpha} b={beta}, proxy={proxy_type} Test"), flush=True)
+                
+    # metric_dict = metrics_in_batches(
+    #                 X_test, y_test, mixed_predictor, unseen_labels,
+    #                 alpha=0, beta=0, proxy_type='zero')
 
-    metric_dict = metrics_in_batches(
-        X_test, y_test, mixed_predictor, unseen_labels,
-        alpha=1, beta=0, proxy_type="zero")
-    print(linear.tabulate_metrics(metric_dict, "test"))
+    # print(linear.tabulate_metrics(metric_dict, f"Test"), flush=True)
 
 if __name__ == "__main__":
     main()
