@@ -112,58 +112,6 @@ class RPrecisionAtK:
     def reset(self):
         self.score = 0
         self.num_sample = 0
-        
-import numpy as np
-
-class PropensityScoredPrecisionAtK:
-    def __init__(self, top_k, label_pos_counts, N, A=0.55, B=1.5):
-        _check_top_k(top_k)
-        assert label_pos_counts.ndim == 1 and N > 0
-        self.top_k = top_k
-
-        C = (np.log(N) - 1.0) * ((B + 1.0) ** A)
-        prop = 1.0 / (1.0 + C * np.power(label_pos_counts.astype(np.float64) + B, -A))
-        self.inv_propensity = 1.0 / np.clip(prop, 1e-12, None)
-
-        self.num_sum = 0.0   # sum over rows of weighted hits@K / K
-        self.denom_sum = 0.0 # sum over rows of ideal@K / K
-        self.n_rows = 0
-
-    def update(self, preds: np.ndarray, target: np.ndarray):
-        assert preds.shape == target.shape
-        K = self.top_k
-
-        # Top-K by predicted score
-        topk_idx = np.argpartition(preds, -K, axis=1)[:, -K:]
-        y_topk = np.take_along_axis(target, topk_idx, axis=1).astype(np.float64)
-        invp_topk = self.inv_propensity[topk_idx]
-
-        # Numerator: weighted correct@K
-        num = (y_topk * invp_topk).sum(axis=1) / K  # (B,)
-
-        # Denominator: ideal@K = top-K inv-prop among the true labels
-        # Build per-row inv_prop only on true labels
-        true_mask = target.astype(bool)
-        true_invp = np.where(true_mask, self.inv_propensity, -1.0)
-        topk_true = np.partition(true_invp, -K, axis=1)[:, -K:]
-        topk_true = np.clip(topk_true, 0.0, None)      # ignore -1 (non-trues)
-        denom = topk_true.sum(axis=1) / K              # (B,)
-
-        self.num_sum += num.sum()
-        self.denom_sum += denom.sum()
-        self.n_rows += preds.shape[0]
-
-    def compute(self) -> float:
-        if self.n_rows == 0 or self.denom_sum <= 0:
-            return 0.0
-        return float((self.num_sum / self.denom_sum) * 100.0)  # % like xclib
-
-    def reset(self):
-        self.num_sum = 0.0
-        self.denom_sum = 0.0
-        self.n_rows = 0
-
-
 
 
 class PrecisionAtK:
@@ -198,7 +146,7 @@ class PrecisionAtK:
     def reset(self):
         self.score = 0
         self.num_sample = 0
-        
+
 
 class RecallAtK:
     """Compute the Recall@K. Please refer to the `implementation document`
@@ -253,9 +201,8 @@ class ZeroShotRecallAtK:
         return self.update_argsort(np.argpartition(preds, -self.top_k), target)
 
     def update_argsort(self, argsort_preds: np.ndarray, target: np.ndarray):
-        top_k_idx = argsort_preds[:, -self.top_k :] # top k indices
-        is_unseen_top_k = np.isin(top_k_idx, self.unseen_labels) # return a true false array
-        # marking the unseen labels in top k
+        top_k_idx = argsort_preds[:, -self.top_k :]
+        is_unseen_top_k = np.isin(top_k_idx, self.unseen_labels)
         num_relevant = \
             np.logical_and(
                 np.take_along_axis(target, top_k_idx, -1),
@@ -388,7 +335,7 @@ class MetricCollection(dict):
             metric.reset()
 
 
-def get_metrics(monitor_metrics: list[str], num_classes: int, unseen_labels=None, label_pos_counts=None, num_instances=None, multiclass: bool = False) -> MetricCollection:
+def get_metrics(monitor_metrics: list[str], num_classes: int, unseen_labels, multiclass: bool = False) -> MetricCollection:
     """Get a collection of metrics by their names.
     See MetricCollection for more details.
 
@@ -415,8 +362,6 @@ def get_metrics(monitor_metrics: list[str], num_classes: int, unseen_labels=None
             metrics[metric] = RPrecisionAtK(top_k=int(metric[3:]))
         elif re.match(r"NDCG@\d+", metric):
             metrics[metric] = NDCGAtK(top_k=int(metric[5:]))
-        elif re.match(r"PSP@\d+", metric):
-            metrics[metric] = PropensityScoredPrecisionAtK(top_k=int(metric[4:]), label_pos_counts=label_pos_counts, N=num_instances)
         elif metric in {"Another-Macro-F1", "Macro-F1", "Micro-F1"}:
             metrics[metric] = F1(num_classes, average=metric[:-3].lower(), multiclass=multiclass)
         else:
@@ -426,9 +371,7 @@ def get_metrics(monitor_metrics: list[str], num_classes: int, unseen_labels=None
 
 
 def compute_metrics(
-    preds: np.ndarray, target: np.ndarray, monitor_metrics: list[str],
-    unseen_labels = None, label_pos_counts = None, num_instances = None,
-    multiclass: bool = False
+    preds: np.ndarray, target: np.ndarray, monitor_metrics: list[str], multiclass: bool = False
 ) -> dict[str, float]:
     """Compute metrics with decision values and labels.
     See get_metrics and MetricCollection if decision values and labels are too
@@ -446,7 +389,7 @@ def compute_metrics(
     """
     assert preds.shape == target.shape
 
-    metric = get_metrics(monitor_metrics, preds.shape[1], unseen_labels, label_pos_counts, num_instances, multiclass)
+    metric = get_metrics(monitor_metrics, preds.shape[1], multiclass)
     metric.update(preds, target)
     return metric.compute()
 
