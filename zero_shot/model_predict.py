@@ -197,7 +197,8 @@ def main():
     X_test, y_test = load_svm_data(test_data_path, n_features=X_train.shape[1])
     X_label, _ = load_svm_data(label_feature_path, n_features=X_train.shape[1])
 
-    binarizer = MultiLabelBinarizer(sparse_output=True)
+    binarizer = MultiLabelBinarizer(
+        classes=np.arange(X_label.shape[0], dtype="float"), sparse_output=True)
     binarizer.fit(y_train + y_test)
     y_train = binarizer.transform(y_train)
     y_test = binarizer.transform(y_test)
