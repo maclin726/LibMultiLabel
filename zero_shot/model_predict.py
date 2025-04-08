@@ -11,7 +11,7 @@ Options:
     --test_instance_data_path=<test_data>    Path to the testing instance data file (string).
     --label_feature_path=<label_features>    Path to the label data file (string).
 """
-
+import json
 import sys
 import os
 
@@ -31,6 +31,41 @@ from docopt import docopt
 from sklearn.datasets import load_svmlight_file
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy.optimize import minimize
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class Head(nn.Module):
+    def __init__(self, feature_in, head_size):
+        super().__init__()
+        self.key = nn.Linear(feature_in, head_size, bias=False)
+        self.query = nn.Linear(feature_in, head_size, bias=False)
+        self.value = nn.Linear(feature_in, head_size, bias=False)
+        self.head_size = head_size
+
+    def forward(self, x):
+        k = self.key(x)
+        q = self.query(x)
+        v = self.value(x)
+        weight = q @ k.T
+        weight = torch.softmax(weight, dim=-1)
+        weight = weight.detach().numpy()
+        return weight
+    
+class MultiHeadAttention(nn.Module):
+    def __init__(self, feature_in, head_size, num_heads):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(feature_in, head_size) for _ in range(num_heads)])
+        self.head_size = head_size
+        self.num_heads = num_heads
+
+    def forward(self, x):
+        weights = [head(x) for head in self.heads]
+        weights = torch.cat(weights, dim=-1)
+        return weights
 
 def load_svm_data(file_path, /, *args, **keywords):
     """
@@ -157,6 +192,63 @@ class MixedPredictor:
             nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
             # shape: (n_instances, n_unseen labels, n_nearest neighbors)
             proxy = np.average(preds[:,nearest_seen_labels], axis=2)
+            
+        elif proxy_type == "weighted_avg":
+            nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
+            distances, _ = NearestNeighbors(n_neighbors=3).fit(self.seen_label_feature).kneighbors(self.unseen_label_feature)
+            similarities = 1 / (distances + 1e-10)
+            weight_sum = np.sum(similarities, axis=1, keepdims=True)
+            weights = similarities / weight_sum
+            proxy = np.sum(preds[:,nearest_seen_labels] * weights[None, :, :], axis=2)
+            
+        elif proxy_type == "attention":
+            D_proj = 1024
+            key = nn.Linear(self.seen_label_feature.shape[1], D_proj, bias=False)
+            query = nn.Linear(self.unseen_label_feature.shape[1], D_proj, bias=False)
+            # value = nn.Linear(self.seen_label_feature.shape[1], D_proj, bias=False)
+            
+            seen_label_tensor_dense = self.seen_label_feature.toarray()
+            unseen_label_tensor_dense = self.unseen_label_feature.toarray()
+            # x_dense = x.toarray()
+            
+            seen_label_tensor = torch.tensor(seen_label_tensor_dense, dtype=torch.float32)
+            unseen_label_tensor = torch.tensor(unseen_label_tensor_dense, dtype=torch.float32)
+            # x = torch.tensor(x_dense, dtype=torch.float32)
+            
+            k = key(seen_label_tensor)
+            q = query(unseen_label_tensor)
+            
+            weight = q @ k.T
+            weight = torch.softmax(weight, dim=-1)
+            weight = weight.detach().numpy()
+
+            proxy = preds[:,self.seen_labels] @ weight.T # goal is (256, 74)
+            
+        elif proxy_type == "attention_test":
+            D_proj = 1024
+            num_heads = 8
+            head_size = D_proj // num_heads
+            key_proj = nn.Linear(self.seen_label_feature.shape[1], D_proj, bias=False)
+            query_proj = nn.Linear(self.unseen_label_feature.shape[1], D_proj, bias=False)
+            seen_dense = self.seen_label_feature.toarray()
+            unseen_dense = self.unseen_label_feature.toarray()
+            seen_label_tensor = torch.tensor(seen_dense, dtype=torch.float32)
+            unseen_label_tensor = torch.tensor(unseen_dense, dtype=torch.float32)
+            
+            k = key_proj(seen_label_tensor)
+            q = query_proj(unseen_label_tensor)
+            k = k.view(-1, num_heads, head_size).transpose(0, 1)
+            q = q.view(-1, num_heads, head_size).transpose(0, 1)
+            
+            weight = q @ k.transpose(-2, -1) / math.sqrt(head_size)
+            weight = torch.softmax(weight, dim=-1)
+            weight = weight.mean(dim=0)
+            weight = weight.detach().numpy()
+            # print(weight.shape)
+            # print(preds[:,self.seen_labels].shape)
+            proxy = preds[:,self.seen_labels] @ weight.T
+            
+            
         elif proxy_type == "min":
             # bad performance
             nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
@@ -166,8 +258,11 @@ class MixedPredictor:
 
         preds[:,self.unseen_labels] = \
             beta * proxy + (1-beta) * unseen_label_doc_sim
+        # get average of preds[:,self.unseen_labels] and preds[:,self.seen_labels] and plot them
+        
         
         return preds
+
 
 def main():
     # Parse command-line arguments
@@ -188,17 +283,24 @@ def main():
     print("Start processing...")
 
     # Load models and data
+    print("check point 1")
     with open(model_path, "rb") as _F:
         model = pickle.load(_F)['model']
 
     # model.flat_model.weights.shape: (n_features, n_classifiers)
     X_train, y_train = load_svm_data(
         train_data_path, n_features=model.flat_model.weights.shape[0])
+
     X_test, y_test = load_svm_data(test_data_path, n_features=X_train.shape[1])
     X_label, _ = load_svm_data(label_feature_path, n_features=X_train.shape[1])
+<<<<<<< Updated upstream
 
     binarizer = MultiLabelBinarizer(
         classes=np.arange(X_label.shape[0], dtype="float"), sparse_output=True)
+=======
+    print("check point 2")
+    binarizer = MultiLabelBinarizer(sparse_output=True)
+>>>>>>> Stashed changes
     binarizer.fit(y_train + y_test)
     y_train = binarizer.transform(y_train)
     y_test = binarizer.transform(y_test)
@@ -206,6 +308,7 @@ def main():
     unseen_labels = np.setdiff1d(
         np.arange(X_label.shape[0], dtype="int"), seen_labels)
 
+    print("testing")
     # Init a mixed predictor
     mixed_predictor = MixedPredictor(
         np.arange(X_label.shape[0], dtype="int"),
@@ -215,9 +318,22 @@ def main():
     )
     
     # a grid search
-    proxy_types = ["insert_closest", "min", "avg"]
-    alphas = [0, 0.25, 0.5, 0.75, 1]
-    betas = [0, 0.25, 0.5, 0.75, 1]
+    proxy_types = ["insert_closest", "avg", "attention", "weighted_avg"]
+    # proxy_types = ["attention_test"]
+    """
+    Original 
+    """
+    # print("running?")
+    # alphas = [0, 0.25, 0.5, 0.75, 1]
+    # betas = [0, 0.25, 0.5, 0.75, 1]
+    alphas = np.arange(0, 1.1, 0.1)
+    betas = np.arange(0, 1.1, 0.1)
+    pr_scores = []
+    zsrs = []
+    alpha_log = []
+    beta_log = []
+    
+    logs = {'alpha': [], 'beta': [], 'pr_score': [], 'zsr': []}
     for proxy_type in proxy_types:
         for alpha in alphas:
             for beta in betas:
@@ -226,9 +342,33 @@ def main():
                 metric_dict = metrics_in_batches(
                     X_test, y_test, mixed_predictor, unseen_labels,
                     alpha=alpha, beta=beta, proxy_type=proxy_type)
+                
+                pr_score = np.average(metric_dict["P@1"] + metric_dict["P@3"] + metric_dict["P@5"] + metric_dict["R@10"] + metric_dict["R@20"] + metric_dict["R@50"])
+                zsr = np.average(metric_dict["ZSR@10"] + metric_dict["ZSR@20"] + metric_dict["ZSR@50"])
+
+                logs['alpha'].append(alpha)
+                logs['beta'].append(beta)
+                logs['pr_score'].append(pr_score)
+                logs['zsr'].append(zsr)
+                
                 print(linear.tabulate_metrics(
                         metric_dict, 
                         f"a={alpha} b={beta}, proxy={proxy_type} Test"), flush=True)
+        # save logs as json
+        
+        with open(f'logs_{proxy_type}.json', 'w') as f:
+            json.dump(logs, f)
+            
+    # plot the pr_scores and zsrs
+    # import matplotlib.pyplot as plt
+    # plt.figure(figsize=(10, 6))
+    # plt.plot(pr_scores, zsrs, marker='o')   
+    # plt.title('PR Scores vs ZSRs')
+    # plt.xlabel('PR Scores')
+    # plt.ylabel('ZSRs')
+    # plt.grid()
+    # plt.savefig('pr_scores_vs_zsr.png')
+    
                 
     # metric_dict = metrics_in_batches(
     #                 X_test, y_test, mixed_predictor, unseen_labels,
