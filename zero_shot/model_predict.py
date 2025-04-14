@@ -88,7 +88,9 @@ def predict_values_by_tfidf(instance_tfidf, label_tfidf):
         Returns:
             np.array: A matrix of shape (#instances, #labels).
     """
+    
     return (instance_tfidf @ label_tfidf.T).toarray()
+
 
 def metrics_in_batches(X, y, predictor, unseen_labels, **kargs_for_predictors):
     batch_size = 256
@@ -133,9 +135,12 @@ class MixedPredictor:
             == self.all_label_map.shape[0]
         ), "The set of seen labels should be a subset of all labels."
 
+        
         self.seen_label_feature = label_feature[self.seen_labels]
         self.unseen_label_feature = label_feature[self.unseen_labels]
+        print("seen label feature:",self.seen_label_feature.shape)
         self.label_neighbors = self.get_kneighbors() # (n_labels, n_neighbors)
+        
 
     def get_kneighbors(self, n_neighbors=5):
         neigh = NearestNeighbors(n_neighbors=n_neighbors)
@@ -144,6 +149,8 @@ class MixedPredictor:
 
     def predict_values_on_seen_label(self, x):
         preds = self.supervised_model.predict_values(x)
+        print('prediction shape')
+        print(preds.shape)
         return preds
 
     def predict_values_on_unseen_label(self, x):
@@ -171,14 +178,20 @@ class MixedPredictor:
         preds = np.zeros((x.shape[0], self.all_label_map.shape[0]))
         seen_label_doc_sim = \
             predict_values_by_tfidf(x, self.seen_label_feature)
+        print('getting shapes seen_label_doc_sim')
+        print('x:',x.shape)
+        print('seen_label_feature shape:',self.seen_label_feature.shape)
+        print('seen_label_doc_sim shape:',seen_label_doc_sim.shape)
         unseen_label_doc_sim = \
             predict_values_by_tfidf(x, self.unseen_label_feature)
+            
         s_hat_seen = self.predict_values_on_seen_label(x)
         
         preds[:,self.seen_labels] = \
             alpha * s_hat_seen + (1-alpha) * seen_label_doc_sim
         
         proxy = np.zeros((x.shape[0], self.unseen_labels.shape[0]))
+        
         if proxy_type == "zero":
             pass
         elif proxy_type == "insert_closest":
@@ -248,7 +261,6 @@ class MixedPredictor:
             # print(preds[:,self.seen_labels].shape)
             proxy = preds[:,self.seen_labels] @ weight.T
             
-            
         elif proxy_type == "min":
             # bad performance
             nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
@@ -293,14 +305,9 @@ def main():
 
     X_test, y_test = load_svm_data(test_data_path, n_features=X_train.shape[1])
     X_label, _ = load_svm_data(label_feature_path, n_features=X_train.shape[1])
-<<<<<<< Updated upstream
 
     binarizer = MultiLabelBinarizer(
         classes=np.arange(X_label.shape[0], dtype="float"), sparse_output=True)
-=======
-    print("check point 2")
-    binarizer = MultiLabelBinarizer(sparse_output=True)
->>>>>>> Stashed changes
     binarizer.fit(y_train + y_test)
     y_train = binarizer.transform(y_train)
     y_test = binarizer.transform(y_test)
@@ -334,6 +341,8 @@ def main():
     beta_log = []
     
     logs = {'alpha': [], 'beta': [], 'pr_score': [], 'zsr': []}
+    from datetime import datetime
+    start_time = datetime.today().strftime('%Y-%m-%d-%H:%M:%S')
     for proxy_type in proxy_types:
         for alpha in alphas:
             for beta in betas:
@@ -343,8 +352,8 @@ def main():
                     X_test, y_test, mixed_predictor, unseen_labels,
                     alpha=alpha, beta=beta, proxy_type=proxy_type)
                 
-                pr_score = np.average(metric_dict["P@1"] + metric_dict["P@3"] + metric_dict["P@5"] + metric_dict["R@10"] + metric_dict["R@20"] + metric_dict["R@50"])
-                zsr = np.average(metric_dict["ZSR@10"] + metric_dict["ZSR@20"] + metric_dict["ZSR@50"])
+                pr_score = np.average([metric_dict["P@1"], metric_dict["P@3"], metric_dict["P@5"], metric_dict["R@10"], metric_dict["R@20"], metric_dict["R@50"]])
+                zsr = np.average([metric_dict["ZSR@10"],metric_dict["ZSR@20"],metric_dict["ZSR@50"]])
 
                 logs['alpha'].append(alpha)
                 logs['beta'].append(beta)
@@ -356,7 +365,7 @@ def main():
                         f"a={alpha} b={beta}, proxy={proxy_type} Test"), flush=True)
         # save logs as json
         
-        with open(f'logs_{proxy_type}.json', 'w') as f:
+        with open(f'logs_{proxy_type}_{start_time}.json', 'w') as f:
             json.dump(logs, f)
             
     # plot the pr_scores and zsrs
