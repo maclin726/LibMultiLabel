@@ -7,11 +7,17 @@
 Note: Please change `run.sh` accordingly before running; check the script for more details.
 
 Define your strategy before running an experiment. There are currently 3 strategies:
+
     - raw
+
     - rank_rrf
+
     - rank_normal 
+
 raw: Only use the raw scores.
+
 rank_rrf: Reciprocal Rank Fusion.
+
 rank_normal: Ranking only.
 
 run_name: to specify the name of the log file.
