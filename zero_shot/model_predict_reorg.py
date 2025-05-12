@@ -79,18 +79,12 @@ def metrics_in_batches(X, y, predictor, unseen_labels, metric_list, **kargs_for_
     )
 
     for i in range(num_batches):
-        # getting predictions
         # orignal
         preds = predictor.predict_on_all_label(
             X[i * batch_size : (i + 1) * batch_size], 
             **kargs_for_predictors
         )
         
-        # tfidf only
-        # preds = predictor.predict_values_on_all_label(
-        #     X[i * batch_size : (i + 1) * batch_size],
-        #     **kargs_for_predictors
-        # )
         
         target = y[i * batch_size : (i + 1) * batch_size].toarray()
         # compare
@@ -179,7 +173,10 @@ class MixedPredictor:
         s_hat_seen = self.predict_values_on_seen_label(x)
         
         proxy = np.zeros((x.shape[0], self.unseen_labels.shape[0]))
-        
+
+        preds[:,self.seen_labels] = \
+            alpha * s_hat_seen + (1-alpha) * seen_label_doc_sim
+            
         if proxy_type == "zero":
             pass
         elif proxy_type == "insert_closest":
@@ -197,16 +194,10 @@ class MixedPredictor:
             D_proj = 1024
             key = nn.Linear(self.seen_label_feature.shape[1], D_proj, bias=False)
             query = nn.Linear(self.unseen_label_feature.shape[1], D_proj, bias=False)
-            # value = nn.Linear(self.seen_label_feature.shape[1], D_proj, bias=False)
-            
             seen_label_tensor_dense = self.seen_label_feature.toarray()
             unseen_label_tensor_dense = self.unseen_label_feature.toarray()
-            # x_dense = x.toarray()
-            
             seen_label_tensor = torch.tensor(seen_label_tensor_dense, dtype=torch.float32)
             unseen_label_tensor = torch.tensor(unseen_label_tensor_dense, dtype=torch.float32)
-            # x = torch.tensor(x_dense, dtype=torch.float32)
-            
             k_attention = key(seen_label_tensor)
             q = query(unseen_label_tensor)
             
@@ -215,29 +206,7 @@ class MixedPredictor:
             weight = weight.detach().numpy()
 
             proxy = preds[:,self.seen_labels] @ weight.T # goal is (256, 74)           
-        elif proxy_type == "attention_test":
-            D_proj = 1024
-            num_heads = 8
-            head_size = D_proj // num_heads
-            key_proj = nn.Linear(self.seen_label_feature.shape[1], D_proj, bias=False)
-            query_proj = nn.Linear(self.unseen_label_feature.shape[1], D_proj, bias=False)
-            seen_dense = self.seen_label_feature.toarray()
-            unseen_dense = self.unseen_label_feature.toarray()
-            seen_label_tensor = torch.tensor(seen_dense, dtype=torch.float32)
-            unseen_label_tensor = torch.tensor(unseen_dense, dtype=torch.float32)
             
-            k = key_proj(seen_label_tensor)
-            q = query_proj(unseen_label_tensor)
-            k = k.view(-1, num_heads, head_size).transpose(0, 1)
-            q = q.view(-1, num_heads, head_size).transpose(0, 1)
-            
-            weight = q @ k.transpose(-2, -1) / math.sqrt(head_size)
-            weight = torch.softmax(weight, dim=-1)
-            weight = weight.mean(dim=0)
-            weight = weight.detach().numpy()
-            # print(weight.shape)
-            # print(preds[:,self.seen_labels].shape)
-            proxy = preds[:,self.seen_labels] @ weight.T
         elif proxy_type == "min":
             # bad performance
             nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
@@ -256,28 +225,28 @@ class MixedPredictor:
             ranks_proxy = np.argsort(np.argsort(-proxy, axis=1), axis=1)
             preds[:,self.unseen_labels] = \
                 beta * (1 / (ranks_proxy + k)) + (1-beta) * (1 /  (ranks_unseen_label_doc_sim + k))
+                
         elif self.strategy == 'rank_normal':
             ranks_s_hat_seen = np.argsort(np.argsort(-s_hat_seen, axis=1), axis=1)
             ranks_seen_label_doc_sim = np.argsort(np.argsort(-seen_label_doc_sim, axis=1), axis=1)
             ranks_unseen_label_doc_sim = np.argsort(np.argsort(-unseen_label_doc_sim, axis=1), axis=1)
             
             combined_ranks_seen = alpha * ranks_s_hat_seen + (1 - alpha) * ranks_seen_label_doc_sim
-            final_ranks_seen = np.argsort(np.argsort(combined_ranks_seen, axis=1), axis=1)
             # prediction for seen labels
-            preds[:, self.seen_labels] = -final_ranks_seen
+            preds[:, self.seen_labels] = -combined_ranks_seen
             
             ranks_proxy = np.argsort(np.argsort(-proxy, axis=1), axis=1)
             combined_ranks_unseen = beta * ranks_proxy + (1 - beta) * ranks_unseen_label_doc_sim
-            final_ranks_unseen = np.argsort(np.argsort(combined_ranks_unseen, axis=1), axis=1)
             # prediction for unseen labels
-            preds[:, self.unseen_labels] = -final_ranks_unseen           
+            preds[:, self.unseen_labels] = -combined_ranks_unseen
+            
         elif self.strategy == 'raw':
-            # prediction for seen labels
-            preds[:,self.seen_labels] = \
-            alpha * s_hat_seen + (1-alpha) * seen_label_doc_sim
             # prediction for unseen labels
+
+            
             preds[:,self.unseen_labels] = \
             beta * proxy + (1-beta) * unseen_label_doc_sim
+        
         
         return preds
 
@@ -338,16 +307,9 @@ def main():
     
     # a grid search
     proxy_types = ["zero","attention","avg", "insert_closest"]
-    # proxy_types = ["attention_test"] ,
-    """
-    Original 
-    """
-    # print("running?")
-    # alphas = [1]
-    # betas = [0.25, 0.5, 0.75, 1]
     
     alphas = np.arange(0, 1.1, 0.1)
-    betas = np.arange(0.0, 1.1, 0.1)
+    betas = np.arange(0.5, 1.1, 0.1)
     
     metric_list = [
         "P@1", "P@3", "P@5", 
@@ -364,8 +326,6 @@ def main():
                     X_test, y_test, mixed_predictor, unseen_labels, metric_list,
                     alpha=alpha, beta=beta, proxy_type=proxy_type)
                 
-                # pr_score = np.average([metric_dict["P@1"], metric_dict["P@3"], metric_dict["P@5"], metric_dict["R@10"], metric_dict["R@20"], metric_dict["R@50"]])
-                # zsr = np.average([metric_dict["ZSR@10"],metric_dict["ZSR@20"],metric_dict["ZSR@50"]])
                 # store the metrics to a list then append to full_metrics
                 full_metrics = {}
                 for metric in metric_list:
@@ -382,23 +342,6 @@ def main():
         
         with open(f'logs_{proxy_type}_{run_name}.json', 'w') as f:
             json.dump(logs, f)
-            
-    # plot the pr_scores and zsrs
-    # import matplotlib.pyplot as plt
-    # plt.figure(figsize=(10, 6))
-    # plt.plot(pr_scores, zsrs, marker='o')   
-    # plt.title('PR Scores vs ZSRs')
-    # plt.xlabel('PR Scores')
-    # plt.ylabel('ZSRs')
-    # plt.grid()
-    # plt.savefig('pr_scores_vs_zsr.png')
-    
-                
-    # metric_dict = metrics_in_batches(
-    #                 X_test, y_test, mixed_predictor, unseen_labels,
-    #                 alpha=0, beta=0, proxy_type='zero')
-
-    # print(linear.tabulate_metrics(metric_dict, f"Test"), flush=True)
 
 if __name__ == "__main__":
     main()
