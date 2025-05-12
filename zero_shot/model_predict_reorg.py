@@ -18,6 +18,8 @@ Options:
 import json
 import sys
 import os
+import cupy as cp
+import cupyx.scipy.sparse as cpx_sparse
 
 # Add the parent directory to sys.path
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -65,6 +67,27 @@ def predict_values_by_tfidf(instance_tfidf, label_tfidf):
     """
     
     return (instance_tfidf @ label_tfidf.T).toarray()
+
+def predict_values_by_tfidf_gpu(instance_tfidf, label_tfidf):
+    """
+    Calculates the similarity scores between instance and label tfidf vectors using GPU.
+
+    Args:
+        instance_tfidf (scipy.sparse.csr_matrix): Shape (#instances, #features).
+        label_tfidf (scipy.sparse.csr_matrix): Shape (#labels, #features).
+
+    Returns:
+        np.ndarray: Similarity score matrix of shape (#instances, #labels).
+    """
+    # Convert SciPy sparse matrices to CuPy sparse
+    instance_gpu = cpx_sparse.csr_matrix(instance_tfidf)
+    label_gpu = cpx_sparse.csr_matrix(label_tfidf)
+
+    # Sparse matrix multiplication on GPU
+    score_gpu = instance_gpu @ label_gpu.T
+    score_dense_gpu = score_gpu.toarray()     
+    # Bring result back to CPU (as numpy array)
+    return cp.asnumpy(score_dense_gpu)
 
 
 def metrics_in_batches(X, y, predictor, unseen_labels, metric_list, **kargs_for_predictors):
@@ -130,7 +153,7 @@ class MixedPredictor:
         return preds
 
     def predict_values_on_unseen_label(self, x):
-        preds = predict_values_by_tfidf(x, self.unseen_label_feature)
+        preds = predict_values_by_tfidf_gpu(x, self.unseen_label_feature)
         return preds
     
     def predict_values_on_all_label(self, x):
@@ -141,7 +164,7 @@ class MixedPredictor:
         )
         all_label = sparse.vstack(all_label)
         all_label = all_label.toarray()
-        preds = predict_values_by_tfidf(x, all_label)
+        preds = predict_values_by_tfidf_gpu(x, all_label)
         return preds
         
         
@@ -166,17 +189,21 @@ class MixedPredictor:
         """
         preds = np.zeros((x.shape[0], self.all_label_map.shape[0]))
         seen_label_doc_sim = \
-            predict_values_by_tfidf(x, self.seen_label_feature)
+            predict_values_by_tfidf_gpu(x, self.seen_label_feature)
         unseen_label_doc_sim = \
-            predict_values_by_tfidf(x, self.unseen_label_feature)
+            predict_values_by_tfidf_gpu(x, self.unseen_label_feature)
             
         s_hat_seen = self.predict_values_on_seen_label(x)
         
         proxy = np.zeros((x.shape[0], self.unseen_labels.shape[0]))
-
+        # print(type(s_hat_seen), type(seen_label_doc_sim), type(alpha))
+        # score1 = alpha * s_hat_seen
+        # score2 = (1 - alpha) * seen_label_doc_sim
+        # print("score1:", type(score1), isinstance(score1, np.ndarray))
+        # print("score2:", type(score2), isinstance(score2, np.ndarray))
+        # combined_score = score1 + score2
         preds[:,self.seen_labels] = \
             alpha * s_hat_seen + (1-alpha) * seen_label_doc_sim
-            
         if proxy_type == "zero":
             pass
         elif proxy_type == "insert_closest":
@@ -306,7 +333,7 @@ def main():
     )
     
     # a grid search
-    proxy_types = ["zero","attention","avg", "insert_closest"]
+    proxy_types = ["zero","attention","avg","insert_closest"]
     
     alphas = np.arange(0, 1.1, 0.1)
     betas = np.arange(0.5, 1.1, 0.1)
