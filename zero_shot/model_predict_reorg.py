@@ -269,8 +269,6 @@ class MixedPredictor:
             
         elif self.strategy == 'raw':
             # prediction for unseen labels
-
-            
             preds[:,self.unseen_labels] = \
             beta * proxy + (1-beta) * unseen_label_doc_sim
         
@@ -336,7 +334,7 @@ def main():
     proxy_types = ["zero","attention","avg","insert_closest"]
     
     alphas = np.arange(0, 1.1, 0.1)
-    betas = np.arange(0.5, 1.1, 0.1)
+    betas = np.arange(0, 1.1, 0.1)
     
     metric_list = [
         "P@1", "P@3", "P@5", 
