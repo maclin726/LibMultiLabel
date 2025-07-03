@@ -206,8 +206,8 @@ class MixedPredictor:
         
         # check if the last files exsist, if all of them exists, good, load them
         if os.path.exists(f"{save_path}/s_hat_seen_{batch_num}.npy"):
-            print("loading found")
-            print(f"loading the {batch_num} batch")
+            if batch_num % 100 == 0:
+                print(f"loading the {batch_num}th batch")
             s_hat_seen = np.load(f"{save_path}/s_hat_seen_{batch_num}.npy")
             seen_label_doc_sim = np.load(f"{save_path}/seen_label_doc_sim_{batch_num}.npy")
             unseen_label_doc_sim = np.load(f"{save_path}/unseen_label_doc_sim_{batch_num}.npy")
@@ -215,6 +215,10 @@ class MixedPredictor:
             start_time = time.time()
             s_hat_seen = self.predict_values_on_seen_label(x)
             s_hat_seen = 1 / (1 + np.exp(-s_hat_seen))
+            # normalize without sigmoid
+            # s_hat_seen = (s_hat_seen - np.min(s_hat_seen, axis=1 , keepdims=True)) / \
+            #     (np.max(s_hat_seen, axis=1, keepdims=True) - np.min(s_hat_seen, axis=1, keepdims=True) + 1e-10)
+                
             seen_label_doc_sim = predict_values_by_tfidf(x, self.seen_label_feature)
             unseen_label_doc_sim = predict_values_by_tfidf(x, self.unseen_label_feature)
             end_time = time.time()
@@ -244,19 +248,36 @@ class MixedPredictor:
         # s_hat_seen = 1 / (1 + np.exp(-s_hat_seen))
         
         # print shapes
-        print(f"s_hat_seen shape: {s_hat_seen.shape}"
-              f", seen_label_doc_sim shape: {seen_label_doc_sim.shape}"
-              f", unseen_label_doc_sim shape: {unseen_label_doc_sim.shape}"
-              f", x shape: {x.shape}")
-        preds[:,self.seen_labels] = \
-            alpha * s_hat_seen + (1-alpha) * seen_label_doc_sim
+        if batch_num % 100 == 0:
+            print(f"s_hat_seen shape: {s_hat_seen.shape}"
+                f", seen_label_doc_sim shape: {seen_label_doc_sim.shape}"
+                f", unseen_label_doc_sim shape: {unseen_label_doc_sim.shape}"
+                f", x shape: {x.shape}")
             
-        
         proxy = np.zeros((x.shape[0], self.unseen_labels.shape[0]))
         
+        if self.strategy == 'raw':
+            preds[:,self.seen_labels] = \
+                alpha * s_hat_seen + (1-alpha) * seen_label_doc_sim
+        elif self.strategy == 'rank_rrf':
+            k = 60
+            ranks_s_hat_seen = np.argsort(np.argsort(-s_hat_seen, axis=1), axis=1)
+            ranks_seen_label_doc_sim = np.argsort(np.argsort(-seen_label_doc_sim, axis=1), axis=1)
+            # prediction for seen labels
+            preds[:, self.seen_labels] = (
+                alpha * (1 / (ranks_s_hat_seen + k)) + 
+                (1 - alpha) * (1 / (ranks_seen_label_doc_sim + k))
+            )
+        elif self.strategy == 'rank_normal':
+            ranks_s_hat_seen = np.argsort(np.argsort(-s_hat_seen, axis=1), axis=1)
+            ranks_seen_label_doc_sim = np.argsort(np.argsort(-seen_label_doc_sim, axis=1), axis=1)
+            # prediction for seen labels
+            preds[:, self.seen_labels] = -(
+                alpha * ranks_s_hat_seen + 
+                (1 - alpha) * ranks_seen_label_doc_sim
+            )
+        
         if proxy_type == "zero":
-            # preds[:,self.unseen_labels] = 0
-            # return preds
             pass
         elif proxy_type == "insert_closest":
             nearest_seen_label = self.label_neighbors[self.unseen_labels, 0]
@@ -331,9 +352,28 @@ class MixedPredictor:
             proxy = np.min(preds[:,nearest_seen_labels], axis=2)
         else:
             raise ValueError("Unknown proxy type for unseen labels")
+        
+        if self.strategy == 'rank_rrf':
+            k = 60
+            ranks_unseen_label_doc_sim = np.argsort(np.argsort(-unseen_label_doc_sim, axis=1), axis=1)
+            ranks_proxy = np.argsort(np.argsort(-proxy, axis=1), axis=1)
+            preds[:,self.unseen_labels] = \
+                beta * (1 / (ranks_proxy + k)) + (1-beta) * (1 /  (ranks_unseen_label_doc_sim + k))
+                
+        elif self.strategy == 'rank_normal':
+            ranks_unseen_label_doc_sim = np.argsort(np.argsort(-unseen_label_doc_sim, axis=1), axis=1)
+            ranks_proxy = np.argsort(np.argsort(-proxy, axis=1), axis=1)
+            combined_ranks_unseen = beta * ranks_proxy + (1 - beta) * ranks_unseen_label_doc_sim
+            # prediction for unseen labels
+            preds[:, self.unseen_labels] = -combined_ranks_unseen
+            
+        elif self.strategy == 'raw':
+            # prediction for unseen labels
+            preds[:,self.unseen_labels] = \
+                beta * proxy + (1-beta) * unseen_label_doc_sim
 
-        preds[:,self.unseen_labels] = \
-            beta * proxy + (1-beta) * unseen_label_doc_sim
+        # preds[:,self.unseen_labels] = \
+        #     beta * proxy + (1-beta) * unseen_label_doc_sim
         # get average of preds[:,self.unseen_labels] and preds[:,self.seen_labels] and plot them
         
         
@@ -399,7 +439,7 @@ def main():
     
     # a grid search
     # proxy_types = ["attention"]
-    proxy_types = ["zero","avg","insert_closest"]
+    proxy_types = ["zero", "insert_closest", "avg"]
     
     alphas = np.arange(0, 1.1, 0.1)
     betas = np.arange(0, 1.1, 0.1)
