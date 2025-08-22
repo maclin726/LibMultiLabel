@@ -150,12 +150,11 @@ class MixedPredictor:
             == self.all_label_map.shape[0]
         ), "The set of seen labels should be a subset of all labels."
 
-        
         self.seen_label_feature = label_feature[self.seen_labels]
         self.unseen_label_feature = label_feature[self.unseen_labels]
         # print("seen label feature:",self.seen_label_feature.shape)
         self.label_neighbors = self.get_kneighbors() # (n_labels, n_neighbors)
-        
+        # global local here
 
     def get_kneighbors(self, n_neighbors=5):
         neigh = NearestNeighbors(n_neighbors=n_neighbors)
@@ -255,17 +254,8 @@ class MixedPredictor:
         if proxy_type == "zero":
             pass
         elif proxy_type == "insert_closest":
-            # nearest_seen_label = self.label_neighbors[self.unseen_labels, 0]
-            # sign = np.sign(
-            #     (x @ (self.label_feature[self.unseen_labels] - \
-            #     self.label_feature[nearest_seen_label]).T).toarray()
-            # )
-            # proxy = preds[:,nearest_seen_label] + sign * 1e-8
             nearest_seen_local  = self.label_neighbors[self.unseen_labels, 0] # local in seen set
             nearest_seen_global = self.seen_labels[nearest_seen_local]  
-            # print(nearest_seen_global.shape, nearest_seen_global)
-            # print(nearest_seen_local.shape, nearest_seen_local)
-            # exit()
             delta_feat = (self.unseen_label_feature - self.seen_label_feature[nearest_seen_local])
             if hasattr(x, "dot"):   # works for scipy.sparse or numpy
                 score_diff = x.dot(delta_feat.T)
@@ -275,12 +265,11 @@ class MixedPredictor:
             proxy = s_hat_full[:,nearest_seen_global] + sign * 1e-8
             s_hat_full[:, self.unseen_labels] = proxy            
         elif proxy_type == "avg":
-            # nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
             nearest_seen_local = self.label_neighbors[self.unseen_labels, :3]
             nearest_seen_global = self.seen_labels[nearest_seen_local]  
             # shape: (n_instances, n_unseen labels, n_nearest neighbors)
             proxy = np.average(s_hat_full[:,nearest_seen_global], axis=2)
-            s_hat_full[:, self.unseen_labels] = proxy      
+            s_hat_full[:, self.unseen_labels] = proxy
         elif proxy_type == "weighted_avg":
             nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
             distances, _ = NearestNeighbors(n_neighbors=3).fit(self.seen_label_feature).kneighbors(self.unseen_label_feature)
@@ -322,22 +311,18 @@ class MixedPredictor:
         
         if self.strategy == 'raw':
             preds[:,self.seen_labels] = \
-                alpha * s_hat_seen + (1-alpha) * seen_label_doc_sim
+                alpha * s_hat_seen + (1-alpha) * seen_label_doc_sim                
+            # prediction for unseen labels
+            if proxy_type == 'zero':
+                preds[:,self.unseen_labels] = (1-beta) * unseen_label_doc_sim
+            else:
+                preds[:,self.unseen_labels] = beta * proxy + (1-beta) * unseen_label_doc_sim         
         elif self.strategy == 'rank_rrf':
             k = 60
             preds[:, mask_seen] = (
                 alpha * (1.0 / (r_s_hat[:, mask_seen] + k)) +
                 (1 - alpha) * (1.0 / (r_doc[:, mask_seen]   + k))
             )
-        elif self.strategy == 'rank_normal':
-            ranks_s_hat_seen = np.argsort(np.argsort(-s_hat_seen, axis=1), axis=1)
-            ranks_seen_label_doc_sim = np.argsort(np.argsort(-seen_label_doc_sim, axis=1), axis=1)
-            # preds[:, self.seen_labels] = alpha * self.norm_rank(ranks_s_hat_seen, len(self.seen_labels)) \
-            #     + (1 - alpha) * self.norm_rank(ranks_seen_label_doc_sim, len(self.seen_labels))
-            preds[:, self.seen_labels] = -(alpha * ranks_s_hat_seen + (1 - alpha) * ranks_seen_label_doc_sim)
-        
-        if self.strategy == 'rank_rrf':
-            k = 60
             if proxy_type == 'zero':
                 preds[:, mask_unseen] = (1 - beta) * (1.0 / (r_doc[:, mask_unseen] + k))
             else:
@@ -346,6 +331,11 @@ class MixedPredictor:
                     (1 - beta) * (1.0 / (r_doc[:,   mask_unseen] + k))
                 )
         elif self.strategy == 'rank_normal':
+            ranks_s_hat_seen = np.argsort(np.argsort(-s_hat_seen, axis=1), axis=1)
+            ranks_seen_label_doc_sim = np.argsort(np.argsort(-seen_label_doc_sim, axis=1), axis=1)
+            # preds[:, self.seen_labels] = alpha * self.norm_rank(ranks_s_hat_seen, len(self.seen_labels)) \
+            #     + (1 - alpha) * self.norm_rank(ranks_seen_label_doc_sim, len(self.seen_labels))
+            preds[:, self.seen_labels] = -(alpha * ranks_s_hat_seen + (1 - alpha) * ranks_seen_label_doc_sim)
             ranks_unseen_label_doc_sim = np.argsort(np.argsort(-unseen_label_doc_sim, axis=1), axis=1)
             ranks_proxy = np.argsort(np.argsort(-proxy, axis=1), axis=1)
             combined_ranks_unseen = beta * ranks_proxy + (1 - beta) * ranks_unseen_label_doc_sim
@@ -357,13 +347,6 @@ class MixedPredictor:
             else:
                 preds[:, self.unseen_labels] = -combined_ranks_unseen
                 # preds[:, self.unseen_labels] = beta * self.norm_rank(ranks_proxy, len(self.unseen_labels)) + (1 - beta) * self.norm_rank(ranks_unseen_label_doc_sim, len(self.unseen_labels))
-        elif self.strategy == 'raw':
-            # prediction for unseen labels
-            if proxy_type == 'zero':
-                preds[:,self.unseen_labels] = (1-beta) * unseen_label_doc_sim
-            else:
-                preds[:,self.unseen_labels] = beta * proxy + (1-beta) * unseen_label_doc_sim
-
         return preds
 
 
