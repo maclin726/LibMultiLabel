@@ -117,7 +117,7 @@ def metrics_in_batches(X, y, predictor, unseen_labels, metric_list, save_path, *
     for i in range(num_batches):
         # orignal
         preds = predictor.predict_on_all_label(
-            X[i * batch_size : (i + 1) * batch_size], save_path=save_path, num_batches=num_batches, batch_num = i,
+            X[i * batch_size : (i + 1) * batch_size], save_path=save_path, batch_num = i,
             **kargs_for_predictors
         )
         
@@ -140,11 +140,11 @@ class MixedPredictor:
             strategy='raw'
         ):
         self.all_label_map = all_label_map
-        self.seen_labels = seen_labels
+        self.seen_labels = seen_labels # contain indices of seen_labels
         self.strategy = strategy
         self.supervised_model = supervised_model
-        self.label_feature = label_feature
-        self.unseen_labels = np.setdiff1d(all_label_map, seen_labels)
+        self.label_feature = label_feature # tfidf of all label description
+        self.unseen_labels = np.setdiff1d(all_label_map, seen_labels) # contains indices of unseen_labels
         assert (
             self.unseen_labels.shape[0] + self.seen_labels.shape[0] 
             == self.all_label_map.shape[0]
@@ -169,8 +169,21 @@ class MixedPredictor:
     def predict_values_on_unseen_label(self, x):
         preds = predict_values_by_tfidf(x, self.unseen_label_feature)
         return preds
+    
+    def ranks_of(self, scores):
+        """
+        
+        Double argsort trick to get rank
+        Negating scores, the largest will have smallest rank
+        Example: scores = [0, 1, 30, 15, 100] => negates to scores = [0, -1, -30, -15, -100]
+        x = np.argsort(-scores) = [4, 2, 3, 1, 0]
+        np.argsort(x) = [4, 3, 1, 2, 0]
+        
+        """
+        return np.argsort(np.argsort(-scores, axis=1), axis=1)
 
-    def predict_on_all_label(self, x, alpha, beta, proxy_type, save_path=None, num_batches=None, batch_num=None):
+
+    def predict_on_all_label(self, x, alpha, beta, proxy_type, save_path=None, batch_num=None):
         """
         Predict the values for all labels based on the unified framework,
         given as
@@ -192,18 +205,7 @@ class MixedPredictor:
         preds = np.zeros((x.shape[0], self.all_label_map.shape[0]))
         
         save_path = os.path.dirname(save_path)
-        n = num_batches
-        # np.save(f"{save_path}/s_hat_seen.npy", s_hat_seen)
-        # np.save(f"{save_path}/seen_label_doc_sim.npy", seen_label_doc_sim)
-        # np.save(f"{save_path}/unseen_label_doc_sim.npy", unseen_label_doc_sim)
-        # check if the files exists
-        # for i in range(n-1, -1, -1):
-        #     
-        #     if os.path.exists(f"{save_path}/s_hat_seen_{i}.npy"):
-        #         continue
-        #     else:
-        #         break
-        
+
         # check if the last files exsist, if all of them exists, good, load them
         if os.path.exists(f"{save_path}/s_hat_seen_{batch_num}.npy"):
             if batch_num % 100 == 0:
@@ -218,7 +220,6 @@ class MixedPredictor:
             # normalize without sigmoid
             # s_hat_seen = (s_hat_seen - np.min(s_hat_seen, axis=1 , keepdims=True)) / \
             #     (np.max(s_hat_seen, axis=1, keepdims=True) - np.min(s_hat_seen, axis=1, keepdims=True) + 1e-10)
-                
             seen_label_doc_sim = predict_values_by_tfidf(x, self.seen_label_feature)
             unseen_label_doc_sim = predict_values_by_tfidf(x, self.unseen_label_feature)
             end_time = time.time()
@@ -231,21 +232,15 @@ class MixedPredictor:
                 np.save(f"{save_path}/seen_label_doc_sim_{batch_num}.npy", seen_label_doc_sim)
                 np.save(f"{save_path}/unseen_label_doc_sim_{batch_num}.npy", unseen_label_doc_sim)
             
-            
-        # s_hat_seen = self.predict_values_on_seen_label(x)
-        # s_hat_seen = 1 / (1 + np.exp(-s_hat_seen))
-        # seen_label_doc_sim = predict_values_by_tfidf(x, self.seen_label_feature)
-        # unseen_label_doc_sim = predict_values_by_tfidf(x, self.unseen_label_feature)
-            # np.save(f"{save_path}/s_hat_seen.npy", s_hat_seen)
-            # np.save(f"{save_path}/seen_label_doc_sim.npy", seen_label_doc_sim)
-            # np.save(f"{save_path}/unseen_label_doc_sim.npy", unseen_label_doc_sim)
-            
-        # seen_label_doc_sim = \
-        #     predict_values_by_tfidf(x, self.seen_label_feature)
-        # unseen_label_doc_sim = \
-        #     predict_values_by_tfidf(x, self.unseen_label_feature)
-        # s_hat_seen = self.predict_values_on_seen_label(x)
-        # s_hat_seen = 1 / (1 + np.exp(-s_hat_seen))
+        n_labels = preds.shape[1]
+        mask_seen = np.zeros(n_labels, dtype=bool) # creat mask for seen labelss
+        mask_seen[self.seen_labels] = True # set indices of seen labels to True
+        mask_unseen = ~mask_seen # set indices of unseen labels to True
+        s_hat_full = np.full_like(preds, -np.inf)
+        s_hat_full[:, mask_seen] = s_hat_seen # putting supervised scores into s_hat_full
+        doc_sim_full = np.full_like(preds, -np.inf)
+        doc_sim_full[:, mask_seen]  = seen_label_doc_sim
+        doc_sim_full[:, mask_unseen] = unseen_label_doc_sim
         
         # print shapes
         if batch_num % 100 == 0:
@@ -253,52 +248,46 @@ class MixedPredictor:
                 f", seen_label_doc_sim shape: {seen_label_doc_sim.shape}"
                 f", unseen_label_doc_sim shape: {unseen_label_doc_sim.shape}"
                 f", x shape: {x.shape}")
-            
+
         proxy = np.zeros((x.shape[0], self.unseen_labels.shape[0]))
         
-        if self.strategy == 'raw':
-            preds[:,self.seen_labels] = \
-                alpha * s_hat_seen + (1-alpha) * seen_label_doc_sim
-        elif self.strategy == 'rank_rrf':
-            k = 60
-            ranks_s_hat_seen = np.argsort(np.argsort(-s_hat_seen, axis=1), axis=1)
-            ranks_seen_label_doc_sim = np.argsort(np.argsort(-seen_label_doc_sim, axis=1), axis=1)
-            # prediction for seen labels
-            preds[:, self.seen_labels] = (
-                alpha * (1 / (ranks_s_hat_seen + k)) + 
-                (1 - alpha) * (1 / (ranks_seen_label_doc_sim + k))
-            )
-        elif self.strategy == 'rank_normal':
-            ranks_s_hat_seen = np.argsort(np.argsort(-s_hat_seen, axis=1), axis=1)
-            ranks_seen_label_doc_sim = np.argsort(np.argsort(-seen_label_doc_sim, axis=1), axis=1)
-            # prediction for seen labels
-            preds[:, self.seen_labels] = -(
-                alpha * ranks_s_hat_seen + 
-                (1 - alpha) * ranks_seen_label_doc_sim
-            )
-        
+        # proxy selection
         if proxy_type == "zero":
             pass
         elif proxy_type == "insert_closest":
-            nearest_seen_label = self.label_neighbors[self.unseen_labels, 0]
-            sign = np.sign(
-                (x @ (self.label_feature[self.unseen_labels] - \
-                self.label_feature[nearest_seen_label]).T).toarray()
-            )
-            proxy = preds[:,nearest_seen_label] + sign * 1e-8
+            # nearest_seen_label = self.label_neighbors[self.unseen_labels, 0]
+            # sign = np.sign(
+            #     (x @ (self.label_feature[self.unseen_labels] - \
+            #     self.label_feature[nearest_seen_label]).T).toarray()
+            # )
+            # proxy = preds[:,nearest_seen_label] + sign * 1e-8
+            nearest_seen_local  = self.label_neighbors[self.unseen_labels, 0] # local in seen set
+            nearest_seen_global = self.seen_labels[nearest_seen_local]  
+            # print(nearest_seen_global.shape, nearest_seen_global)
+            # print(nearest_seen_local.shape, nearest_seen_local)
+            # exit()
+            delta_feat = (self.unseen_label_feature - self.seen_label_feature[nearest_seen_local])
+            if hasattr(x, "dot"):   # works for scipy.sparse or numpy
+                score_diff = x.dot(delta_feat.T)
+            else:
+                score_diff = x @ delta_feat.T
+            sign = np.sign(score_diff.toarray())
+            proxy = s_hat_full[:,nearest_seen_global] + sign * 1e-8
+            s_hat_full[:, self.unseen_labels] = proxy            
         elif proxy_type == "avg":
-            nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
+            # nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
+            nearest_seen_local = self.label_neighbors[self.unseen_labels, :3]
+            nearest_seen_global = self.seen_labels[nearest_seen_local]  
             # shape: (n_instances, n_unseen labels, n_nearest neighbors)
-            proxy = np.average(preds[:,nearest_seen_labels], axis=2)
-            
+            proxy = np.average(s_hat_full[:,nearest_seen_global], axis=2)
+            s_hat_full[:, self.unseen_labels] = proxy      
         elif proxy_type == "weighted_avg":
             nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
             distances, _ = NearestNeighbors(n_neighbors=3).fit(self.seen_label_feature).kneighbors(self.unseen_label_feature)
             similarities = 1 / (distances + 1e-10)
             weight_sum = np.sum(similarities, axis=1, keepdims=True)
             weights = similarities / weight_sum
-            proxy = np.sum(preds[:,nearest_seen_labels] * weights[None, :, :], axis=2)
-            
+            proxy = np.sum(preds[:,nearest_seen_labels] * weights[None, :, :], axis=2)   
         elif proxy_type == "attention":
             D_proj = 1024
             key = nn.Linear(self.seen_label_feature.shape[1], D_proj, bias=False)
@@ -320,32 +309,7 @@ class MixedPredictor:
             weight = torch.softmax(weight, dim=-1)
             weight = weight.detach().numpy()
 
-            proxy = preds[:,self.seen_labels] @ weight.T # goal is (256, 74)
-            
-        elif proxy_type == "attention_test":
-            D_proj = 1024
-            num_heads = 8
-            head_size = D_proj // num_heads
-            key_proj = nn.Linear(self.seen_label_feature.shape[1], D_proj, bias=False)
-            query_proj = nn.Linear(self.unseen_label_feature.shape[1], D_proj, bias=False)
-            seen_dense = self.seen_label_feature.toarray()
-            unseen_dense = self.unseen_label_feature.toarray()
-            seen_label_tensor = torch.tensor(seen_dense, dtype=torch.float32)
-            unseen_label_tensor = torch.tensor(unseen_dense, dtype=torch.float32)
-            
-            k = key_proj(seen_label_tensor)
-            q = query_proj(unseen_label_tensor)
-            k = k.view(-1, num_heads, head_size).transpose(0, 1)
-            q = q.view(-1, num_heads, head_size).transpose(0, 1)
-            
-            weight = q @ k.transpose(-2, -1) / math.sqrt(head_size)
-            weight = torch.softmax(weight, dim=-1)
-            weight = weight.mean(dim=0)
-            weight = weight.detach().numpy()
-            # print(weight.shape)
-            # print(preds[:,self.seen_labels].shape)
-            proxy = preds[:,self.seen_labels] @ weight.T
-            
+            proxy = preds[:,self.seen_labels] @ weight.T # goal is (256, 74)    
         elif proxy_type == "min":
             # bad performance
             nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
@@ -353,30 +317,53 @@ class MixedPredictor:
         else:
             raise ValueError("Unknown proxy type for unseen labels")
         
+        r_s_hat = self.ranks_of(s_hat_full)
+        r_doc   = self.ranks_of(doc_sim_full)
+        
+        if self.strategy == 'raw':
+            preds[:,self.seen_labels] = \
+                alpha * s_hat_seen + (1-alpha) * seen_label_doc_sim
+        elif self.strategy == 'rank_rrf':
+            k = 60
+            preds[:, mask_seen] = (
+                alpha * (1.0 / (r_s_hat[:, mask_seen] + k)) +
+                (1 - alpha) * (1.0 / (r_doc[:, mask_seen]   + k))
+            )
+        elif self.strategy == 'rank_normal':
+            ranks_s_hat_seen = np.argsort(np.argsort(-s_hat_seen, axis=1), axis=1)
+            ranks_seen_label_doc_sim = np.argsort(np.argsort(-seen_label_doc_sim, axis=1), axis=1)
+            # preds[:, self.seen_labels] = alpha * self.norm_rank(ranks_s_hat_seen, len(self.seen_labels)) \
+            #     + (1 - alpha) * self.norm_rank(ranks_seen_label_doc_sim, len(self.seen_labels))
+            preds[:, self.seen_labels] = -(alpha * ranks_s_hat_seen + (1 - alpha) * ranks_seen_label_doc_sim)
+        
         if self.strategy == 'rank_rrf':
             k = 60
-            ranks_unseen_label_doc_sim = np.argsort(np.argsort(-unseen_label_doc_sim, axis=1), axis=1)
-            ranks_proxy = np.argsort(np.argsort(-proxy, axis=1), axis=1)
-            preds[:,self.unseen_labels] = \
-                beta * (1 / (ranks_proxy + k)) + (1-beta) * (1 /  (ranks_unseen_label_doc_sim + k))
-                
+            if proxy_type == 'zero':
+                preds[:, mask_unseen] = (1 - beta) * (1.0 / (r_doc[:, mask_unseen] + k))
+            else:
+                preds[:, mask_unseen] = (
+                    beta * (1.0 / (r_s_hat[:, mask_unseen] + k)) +  # proxy term
+                    (1 - beta) * (1.0 / (r_doc[:,   mask_unseen] + k))
+                )
         elif self.strategy == 'rank_normal':
             ranks_unseen_label_doc_sim = np.argsort(np.argsort(-unseen_label_doc_sim, axis=1), axis=1)
             ranks_proxy = np.argsort(np.argsort(-proxy, axis=1), axis=1)
             combined_ranks_unseen = beta * ranks_proxy + (1 - beta) * ranks_unseen_label_doc_sim
             # prediction for unseen labels
-            preds[:, self.unseen_labels] = -combined_ranks_unseen
-            
+            if proxy_type == 'zero':
+                # preds[:,self.unseen_labels] = -(1 - beta) * ranks_unseen_label_doc_sim
+                # preds[:,self.unseen_labels] = beta * self.norm_rank(ranks_proxy, len(self.unseen_labels)) + (1 - beta) * self.norm_rank(ranks_unseen_label_doc_sim, len(self.unseen_labels))#(1 - beta) * self.norm_rank(ranks_unseen_label_doc_sim, len(self.unseen_labels))
+                preds[:, self.unseen_labels] = -((1 - beta) * ranks_unseen_label_doc_sim)
+            else:
+                preds[:, self.unseen_labels] = -combined_ranks_unseen
+                # preds[:, self.unseen_labels] = beta * self.norm_rank(ranks_proxy, len(self.unseen_labels)) + (1 - beta) * self.norm_rank(ranks_unseen_label_doc_sim, len(self.unseen_labels))
         elif self.strategy == 'raw':
             # prediction for unseen labels
-            preds[:,self.unseen_labels] = \
-                beta * proxy + (1-beta) * unseen_label_doc_sim
+            if proxy_type == 'zero':
+                preds[:,self.unseen_labels] = (1-beta) * unseen_label_doc_sim
+            else:
+                preds[:,self.unseen_labels] = beta * proxy + (1-beta) * unseen_label_doc_sim
 
-        # preds[:,self.unseen_labels] = \
-        #     beta * proxy + (1-beta) * unseen_label_doc_sim
-        # get average of preds[:,self.unseen_labels] and preds[:,self.seen_labels] and plot them
-        
-        
         return preds
 
 
@@ -403,6 +390,7 @@ def main():
     start_time = time.time()
     # Load models and data
     with open(model_path, "rb") as _F:
+        print(model_path)
         model = pickle.load(_F)['model']
     end_time = time.time()
     print(f"Model loaded in {end_time - start_time:.2f} seconds.")
@@ -427,6 +415,9 @@ def main():
     seen_labels = np.nonzero(np.sum(y_train, axis=0)[0])[1]
     unseen_labels = np.setdiff1d(
         np.arange(X_label.shape[0], dtype="int"), seen_labels)
+    print(seen_labels)
+    print("number of seen labels ",len(seen_labels))
+    print(unseen_labels)
 
     # Init a mixed predictor
     mixed_predictor = MixedPredictor(
@@ -440,11 +431,12 @@ def main():
     # a grid search
     # proxy_types = ["attention"]
     proxy_types = ["zero", "insert_closest", "avg"]
+    # proxy_types = ["insert_closest"]
     
-    alphas = np.arange(0, 1.1, 0.1)
+    alphas = [1]
+    # betas = [0.9, 1.0]
+    # alphas = np.arange(0, 1.1, 0.1)
     betas = np.arange(0, 1.1, 0.1)
-    # alphas = [1]
-    # betas = [1]
     
     metric_list = [
         "P@1", "P@3", "P@5",
@@ -478,6 +470,7 @@ def main():
         
         with open(f'logs_{proxy_type}_{run_name}.json', 'w') as f:
             json.dump(logs, f)
+        print(f"wrote to logs_{proxy_type}_{run_name}.json")
 
 if __name__ == "__main__":
     main()
