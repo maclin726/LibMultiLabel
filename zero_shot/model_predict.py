@@ -44,24 +44,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class Head(nn.Module):
-    def __init__(self, feature_in, head_size):
-        super().__init__()
-        self.key = nn.Linear(feature_in, head_size, bias=False)
-        self.query = nn.Linear(feature_in, head_size, bias=False)
-        self.value = nn.Linear(feature_in, head_size, bias=False)
-        self.head_size = head_size
-
-    def forward(self, x):
-        k = self.key(x)
-        q = self.query(x)
-        v = self.value(x)
-        weight = q @ k.T
-        weight = torch.softmax(weight, dim=-1)
-        weight = weight.detach().numpy()
-        return weight
-    
-
 def load_svm_data(file_path, /, *args, **keywords):
     """
     A wrapper of load_svmlight_file with arguments with changed default values:
@@ -85,43 +67,24 @@ def predict_values_by_tfidf(instance_tfidf, label_tfidf):
     """
     
     return (instance_tfidf @ label_tfidf.T).toarray()
-
-# def metrics_in_batches(X, y, preds, unseen_labels, metric_list, save_path, **kargs_for_predictors):
-#     batch_size = 128
-#     num_instances = X.shape[0]
-#     num_batches = math.ceil(num_instances / batch_size)
-#     metrics = linear.get_metrics(
-#         metric_list, 
-#         num_classes=y.shape[1],
-#         unseen_labels=unseen_labels
-#     )
-    
-#     for i in range(num_batches):
-#         target = y[i * batch_size : (i + 1) * batch_size].toarray()
-#         metrics.update(preds[i], target)
-#     return metrics.compute()
         
 
 def metrics_in_batches(X, y, predictor, unseen_labels, metric_list, save_path, **kargs_for_predictors):
     batch_size = 16
     num_instances = X.shape[0]
     num_batches = math.ceil(num_instances / batch_size)
-    print("testing")
     metrics = linear.get_metrics(
         metric_list, 
         num_classes=y.shape[1],
         unseen_labels=unseen_labels
     )
-    # print(num_batches)
-    # exit()
     for i in range(num_batches):
         # orignal
         preds = predictor.predict_on_all_label(
             X[i * batch_size : (i + 1) * batch_size], save_path=save_path, batch_num = i,
             **kargs_for_predictors
         )
-        
-        
+
         target = y[i * batch_size : (i + 1) * batch_size].toarray()
         # compare
         metrics.update(preds, target)
@@ -176,7 +139,7 @@ class MixedPredictor:
         Negating scores, the largest will have smallest rank
         Example: scores = [0, 1, 30, 15, 100] => negates to scores = [0, -1, -30, -15, -100]
         x = np.argsort(-scores) = [4, 2, 3, 1, 0]
-        np.argsort(x) = [4, 3, 1, 2, 0]
+        np.argsort(x) = [4, 2, 3, 1, 0]
         
         """
         return np.argsort(np.argsort(-scores, axis=1), axis=1)
