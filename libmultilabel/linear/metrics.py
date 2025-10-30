@@ -116,77 +116,53 @@ class RPrecisionAtK:
 import numpy as np
 
 class PropensityScoredPrecisionAtK:
-    r"""
-    PSP@K = (1/K) * sum_{j in Rank_K(\hat{y}_i)} y_{ij} / p_j
-
-    Propensity model:
-        p_j = 1 / (1 + C * (ℓ_j + B)^(-A)),
-        C = (log(n) - 1) * (B + 1)^A
-
-    where:
-      - ℓ_j is the # of positive instances for label j (from the TRAIN set),
-      - n is the # of training instances,
-      - A, B are dataset-specific constants (e.g., A=0.55, B=1.5 commonly used).
-    """
-
-    def __init__(self, top_k: int, label_pos_counts: np.ndarray, num_labels: int, A=0.55, B=1.5):
-        """
-        Args:
-            top_k: K in Precision@K.
-            label_pos_counts: shape (L,), ℓ_j counts per label (training set).
-            num_labels: number of training instances used to estimate ℓ_j.
-            A, B: propensity model parameters.
-            implemented based on https://github.com/kunaldahiya/pyxclib/blob/master/xclib/evaluation/xc_metrics.py
-        """
+    def __init__(self, top_k, label_pos_counts, N, A=0.55, B=1.5):
         _check_top_k(top_k)
-
-        assert label_pos_counts.ndim == 1, "label_pos_counts must be 1D of length L"
-        assert num_labels > 0, "number of labels must be positive"
+        assert label_pos_counts.ndim == 1 and N > 0
         self.top_k = top_k
-        self.score = 0.0
-        self.num_sample = 0
 
-        C = (np.log(num_labels) - 1.0) * ((B + 1.0) ** A)
-        self.propensity = 1.0 / (1.0 + C * np.exp(-A * (label_pos_counts.astype(np.float64) + B)))
-        eps = 1e-12 # safe guard against division by zero
-        self.inv_propensity = 1.0 / np.clip(self.propensity, eps, None)
+        C = (np.log(N) - 1.0) * ((B + 1.0) ** A)
+        prop = 1.0 / (1.0 + C * np.power(label_pos_counts.astype(np.float64) + B, -A))
+        self.inv_propensity = 1.0 / np.clip(prop, 1e-12, None)
+
+        self.num_sum = 0.0   # sum over rows of weighted hits@K / K
+        self.denom_sum = 0.0 # sum over rows of ideal@K / K
+        self.n_rows = 0
 
     def update(self, preds: np.ndarray, target: np.ndarray):
-        """
-        Args:
-            preds: (batch_size, num_labels) scores (higher = better).
-            target: (batch_size, num_labels) binary ground truth {0,1}.
-        """
-        assert preds.shape == target.shape  # (B, L)
-        return self.update_argsort(np.argpartition(preds, -self.top_k), target)
-
-    def update_argsort(self, argsort_preds: np.ndarray, target: np.ndarray):
-        """
-        Args:
-            argsort_preds: indices that would partially sort preds per row;
-                           e.g., from np.argpartition(preds, -K)
-            target: (batch_size, num_labels) binary ground truth.
-        """
-        B, L = target.shape
-
+        assert preds.shape == target.shape
         K = self.top_k
-        top_k_idx = argsort_preds[:, -K:]  # (B, K)
-        y_topk = np.take_along_axis(target, top_k_idx, axis=1).astype(np.float64)
-        invp_topk = self.inv_propensity[top_k_idx] 
-        pspk_per_row = (y_topk * invp_topk).sum(axis=1) / K
 
+        # Top-K by predicted score
+        topk_idx = np.argpartition(preds, -K, axis=1)[:, -K:]
+        y_topk = np.take_along_axis(target, topk_idx, axis=1).astype(np.float64)
+        invp_topk = self.inv_propensity[topk_idx]
 
-        self.score += pspk_per_row.sum()
-        self.num_sample += B
+        # Numerator: weighted correct@K
+        num = (y_topk * invp_topk).sum(axis=1) / K  # (B,)
+
+        # Denominator: ideal@K = top-K inv-prop among the true labels
+        # Build per-row inv_prop only on true labels
+        true_mask = target.astype(bool)
+        true_invp = np.where(true_mask, self.inv_propensity, -1.0)
+        topk_true = np.partition(true_invp, -K, axis=1)[:, -K:]
+        topk_true = np.clip(topk_true, 0.0, None)      # ignore -1 (non-trues)
+        denom = topk_true.sum(axis=1) / K              # (B,)
+
+        self.num_sum += num.sum()
+        self.denom_sum += denom.sum()
+        self.n_rows += preds.shape[0]
 
     def compute(self) -> float:
-        if self.num_sample == 0:
+        if self.n_rows == 0 or self.denom_sum <= 0:
             return 0.0
-        return float(self.score / self.num_sample)
+        return float((self.num_sum / self.denom_sum) * 100.0)  # % like xclib
 
     def reset(self):
-        self.score = 0.0
-        self.num_sample = 0
+        self.num_sum = 0.0
+        self.denom_sum = 0.0
+        self.n_rows = 0
+
 
 
 
@@ -412,7 +388,7 @@ class MetricCollection(dict):
             metric.reset()
 
 
-def get_metrics(monitor_metrics: list[str], num_classes: int, unseen_labels=None, label_pos_counts=None, total_label_count=None, multiclass: bool = False) -> MetricCollection:
+def get_metrics(monitor_metrics: list[str], num_classes: int, unseen_labels=None, label_pos_counts=None, num_instances=None, multiclass: bool = False) -> MetricCollection:
     """Get a collection of metrics by their names.
     See MetricCollection for more details.
 
@@ -440,7 +416,7 @@ def get_metrics(monitor_metrics: list[str], num_classes: int, unseen_labels=None
         elif re.match(r"NDCG@\d+", metric):
             metrics[metric] = NDCGAtK(top_k=int(metric[5:]))
         elif re.match(r"PSP@\d+", metric):
-            metrics[metric] = PropensityScoredPrecisionAtK(top_k=int(metric[4:]), label_pos_counts=label_pos_counts, num_labels=total_label_count)
+            metrics[metric] = PropensityScoredPrecisionAtK(top_k=int(metric[4:]), label_pos_counts=label_pos_counts, N=num_instances)
         elif metric in {"Another-Macro-F1", "Macro-F1", "Micro-F1"}:
             metrics[metric] = F1(num_classes, average=metric[:-3].lower(), multiclass=multiclass)
         else:
@@ -451,7 +427,7 @@ def get_metrics(monitor_metrics: list[str], num_classes: int, unseen_labels=None
 
 def compute_metrics(
     preds: np.ndarray, target: np.ndarray, monitor_metrics: list[str],
-    unseen_labels = None, label_pos_counts = None, total_label_count = None,
+    unseen_labels = None, label_pos_counts = None, num_instances = None,
     multiclass: bool = False
 ) -> dict[str, float]:
     """Compute metrics with decision values and labels.
@@ -470,7 +446,7 @@ def compute_metrics(
     """
     assert preds.shape == target.shape
 
-    metric = get_metrics(monitor_metrics, preds.shape[1], unseen_labels, label_pos_counts, total_label_count, multiclass)
+    metric = get_metrics(monitor_metrics, preds.shape[1], unseen_labels, label_pos_counts, num_instances, multiclass)
     metric.update(preds, target)
     return metric.compute()
 
