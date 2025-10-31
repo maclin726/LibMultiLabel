@@ -69,14 +69,17 @@ def predict_values_by_tfidf(instance_tfidf, label_tfidf):
     return (instance_tfidf @ label_tfidf.T).toarray()
         
 
-def metrics_in_batches(X, y, predictor, unseen_labels, metric_list, save_path, **kargs_for_predictors):
+def metrics_in_batches(X, y, predictor, unseen_labels, metric_list, save_path, label_pos_count, num_instances, **kargs_for_predictors):
     batch_size = 16
     num_instances = X.shape[0]
     num_batches = math.ceil(num_instances / batch_size)
+
     metrics = linear.get_metrics(
         metric_list, 
         num_classes=y.shape[1],
-        unseen_labels=unseen_labels
+        unseen_labels=unseen_labels,
+        label_pos_counts=label_pos_count,
+        num_instances=num_instances
     )
     for i in range(num_batches):
         # orignal
@@ -294,23 +297,19 @@ class MixedPredictor:
                     (1 - beta) * (1.0 / (r_doc[:,   mask_unseen] + k))
                 )
         elif self.strategy == 'rank_normal':
-            ranks_s_hat_seen = np.argsort(np.argsort(-s_hat_seen, axis=1), axis=1)
-            ranks_seen_label_doc_sim = np.argsort(np.argsort(-seen_label_doc_sim, axis=1), axis=1)
-            # preds[:, self.seen_labels] = alpha * self.norm_rank(ranks_s_hat_seen, len(self.seen_labels)) \
-            #     + (1 - alpha) * self.norm_rank(ranks_seen_label_doc_sim, len(self.seen_labels))
-            preds[:, self.seen_labels] = -(alpha * ranks_s_hat_seen + (1 - alpha) * ranks_seen_label_doc_sim)
-            ranks_unseen_label_doc_sim = np.argsort(np.argsort(-unseen_label_doc_sim, axis=1), axis=1)
-            ranks_proxy = np.argsort(np.argsort(-proxy, axis=1), axis=1)
-            combined_ranks_unseen = beta * ranks_proxy + (1 - beta) * ranks_unseen_label_doc_sim
-            # prediction for unseen labels
+            preds[:, mask_seen] = (
+                alpha * (1.0 - r_s_hat[:, mask_seen] / preds.shape[1]) +
+                (1 - alpha) * (1.0 - r_doc[:, mask_seen]   / preds.shape[1])
+            )
             if proxy_type == 'zero':
-                # preds[:,self.unseen_labels] = -(1 - beta) * ranks_unseen_label_doc_sim
-                # preds[:,self.unseen_labels] = beta * self.norm_rank(ranks_proxy, len(self.unseen_labels)) + (1 - beta) * self.norm_rank(ranks_unseen_label_doc_sim, len(self.unseen_labels))#(1 - beta) * self.norm_rank(ranks_unseen_label_doc_sim, len(self.unseen_labels))
-                preds[:, self.unseen_labels] = -((1 - beta) * ranks_unseen_label_doc_sim)
+                preds[:, mask_unseen] = (1 - beta) * (1.0 - r_doc[:, mask_unseen] / preds.shape[1])
             else:
-                preds[:, self.unseen_labels] = -combined_ranks_unseen
-                # preds[:, self.unseen_labels] = beta * self.norm_rank(ranks_proxy, len(self.unseen_labels)) + (1 - beta) * self.norm_rank(ranks_unseen_label_doc_sim, len(self.unseen_labels))
+                preds[:, mask_unseen] = (
+                    beta * (1.0 - r_s_hat[:, mask_unseen] / preds.shape[1]) +  # proxy term
+                    (1 - beta) * (1.0 - r_doc[:,   mask_unseen] / preds.shape[1])
+                )
         return preds
+
 
 
 def main():
@@ -348,9 +347,16 @@ def main():
     else:
         X_train, y_train = load_svm_data(
             train_data_path, n_features=model.flat_model.weights.shape[0])
-
+    
     X_test, y_test = load_svm_data(test_data_path, n_features=X_train.shape[1])
     X_label, _ = load_svm_data(label_feature_path, n_features=X_train.shape[1])
+    # y_test is a list [[label1, label2], [label3], ...]
+    lj = np.zeros((7201,), dtype=int)
+    # at the jth label, how many instances
+    for labels in y_train:
+        for label in labels:
+            lj[int(label)] += 1
+
 
     binarizer = MultiLabelBinarizer(
         classes=np.arange(X_label.shape[0], dtype="float"), sparse_output=True)
@@ -361,9 +367,13 @@ def main():
     seen_labels = np.nonzero(np.sum(y_train, axis=0)[0])[1]
     unseen_labels = np.setdiff1d(
         np.arange(X_label.shape[0], dtype="int"), seen_labels)
-    print(seen_labels)
-    print("number of seen labels ",len(seen_labels))
-    print(unseen_labels)
+    
+    
+    num_instances = X_train.shape[0]
+    # print(len(label_pos_counts))
+    # print(label_pos_counts)
+    # print(num_instances)
+    # exit()
 
     # Init a mixed predictor
     mixed_predictor = MixedPredictor(
@@ -374,21 +384,20 @@ def main():
         strategy
     )
     
-    # a grid search
+        # a grid search
     # proxy_types = ["attention"]
-    proxy_types = ["zero", "insert_closest", "avg"]
+    proxy_types = ["avg"]
     # proxy_types = ["insert_closest"]
     
     alphas = [1]
-    # betas = [0.9, 1.0]
-    # alphas = np.arange(0, 1.1, 0.1)
-    betas = np.arange(0, 1.1, 0.1)
+    betas = [0.4]
     
     metric_list = [
         "P@1", "P@3", "P@5",
         "R@1", "R@3", "R@5",
         "NDCG@1", "NDCG@3", "NDCG@5",
-         "ZSR@10", "ZSR@50", "ZSR@100"]
+         "ZSR@10", "ZSR@50", "ZSR@100",
+         "PSP@1", "PSP@3", "PSP@5"]
     
     for proxy_type in proxy_types:
         logs = {'alpha': [], 'beta': [], 'full_metrics': []}
@@ -396,8 +405,10 @@ def main():
             for beta in betas:
                 if alpha < beta:
                     continue
+                # run hyperparameter finding    
                 metric_dict = metrics_in_batches(
                     X_test, y_test, mixed_predictor, unseen_labels, metric_list, model_path,
+                    label_pos_count=lj, num_instances=num_instances,
                     alpha=alpha, beta=beta, proxy_type=proxy_type)
                 
                 # store the metrics to a list then append to full_metrics
