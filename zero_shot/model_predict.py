@@ -69,7 +69,7 @@ def predict_values_by_tfidf(instance_tfidf, label_tfidf):
     return (instance_tfidf @ label_tfidf.T).toarray()
         
 
-def metrics_in_batches(X, y, predictor, unseen_labels, metric_list, save_path, label_pos_count, num_instances, **kargs_for_predictors):
+def metrics_in_batches(X, y, predictor, unseen_labels, metric_list, save_path, label_pos_count, num_instances_train, **kargs_for_predictors):
     batch_size = 16
     num_instances = X.shape[0]
     num_batches = math.ceil(num_instances / batch_size)
@@ -79,7 +79,7 @@ def metrics_in_batches(X, y, predictor, unseen_labels, metric_list, save_path, l
         num_classes=y.shape[1],
         unseen_labels=unseen_labels,
         label_pos_counts=label_pos_count,
-        num_instances=num_instances
+        num_instances=num_instances_train
     )
     for i in range(num_batches):
         # orignal
@@ -173,8 +173,8 @@ class MixedPredictor:
 
         # check if the last files exsist, if all of them exists, good, load them
         if os.path.exists(f"{save_path}/s_hat_seen_{batch_num}.npy"):
-            if batch_num % 100 == 0:
-                print(f"loading the {batch_num}th batch")
+            # if batch_num % 100 == 0:
+            #     print(f"loading the {batch_num}th batch")
             s_hat_seen = np.load(f"{save_path}/s_hat_seen_{batch_num}.npy")
             seen_label_doc_sim = np.load(f"{save_path}/seen_label_doc_sim_{batch_num}.npy")
             unseen_label_doc_sim = np.load(f"{save_path}/unseen_label_doc_sim_{batch_num}.npy")
@@ -208,11 +208,11 @@ class MixedPredictor:
         doc_sim_full[:, mask_unseen] = unseen_label_doc_sim
         
         # print shapes
-        if batch_num % 100 == 0:
-            print(f"s_hat_seen shape: {s_hat_seen.shape}"
-                f", seen_label_doc_sim shape: {seen_label_doc_sim.shape}"
-                f", unseen_label_doc_sim shape: {unseen_label_doc_sim.shape}"
-                f", x shape: {x.shape}")
+        # if batch_num % 100 == 0:
+            # print(f"s_hat_seen shape: {s_hat_seen.shape}"
+            #     f", seen_label_doc_sim shape: {seen_label_doc_sim.shape}"
+            #     f", unseen_label_doc_sim shape: {unseen_label_doc_sim.shape}"
+            #     f", x shape: {x.shape}")
 
         proxy = np.zeros((x.shape[0], self.unseen_labels.shape[0]))
         
@@ -351,8 +351,10 @@ def main():
     X_test, y_test = load_svm_data(test_data_path, n_features=X_train.shape[1])
     X_label, _ = load_svm_data(label_feature_path, n_features=X_train.shape[1])
     # y_test is a list [[label1, label2], [label3], ...]
-    lj = np.zeros((7201,), dtype=int)
+
+    lj = np.zeros((X_label.shape[0],), dtype=int)
     # at the jth label, how many instances
+
     for labels in y_train:
         for label in labels:
             lj[int(label)] += 1
@@ -370,10 +372,6 @@ def main():
     
     
     num_instances = X_train.shape[0]
-    # print(len(label_pos_counts))
-    # print(label_pos_counts)
-    # print(num_instances)
-    # exit()
 
     # Init a mixed predictor
     mixed_predictor = MixedPredictor(
@@ -384,13 +382,10 @@ def main():
         strategy
     )
     
-        # a grid search
-    # proxy_types = ["attention"]
-    proxy_types = ["avg"]
-    # proxy_types = ["insert_closest"]
+    proxy_types = ["insert_closest", "avg", "zero"]
     
     alphas = [1]
-    betas = [0.4]
+    betas = [0.05, 0.15, 0.2, 0.3]
     
     metric_list = [
         "P@1", "P@3", "P@5",
@@ -408,7 +403,7 @@ def main():
                 # run hyperparameter finding    
                 metric_dict = metrics_in_batches(
                     X_test, y_test, mixed_predictor, unseen_labels, metric_list, model_path,
-                    label_pos_count=lj, num_instances=num_instances,
+                    label_pos_count=lj, num_instances_train=num_instances,
                     alpha=alpha, beta=beta, proxy_type=proxy_type)
                 
                 # store the metrics to a list then append to full_metrics
