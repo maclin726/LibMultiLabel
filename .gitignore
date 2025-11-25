@@ -168,3 +168,4 @@ docs/cli/*.include
 !requirements.txt
 !requirements_nn.txt
 !requirements_parameter_search.txt
+baselines/structural-contrastive-representation-learning
