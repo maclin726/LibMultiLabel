@@ -225,7 +225,7 @@ def add_all_arguments(parser):
     parser.add_argument(
         "--linear_technique",
         type=str,
-        default="1vsrest",
+        default="tree",
         choices=["1vsrest", "thresholding", "cost_sensitive", "cost_sensitive_micro", "binary_and_multiclass", "tree"],
         help="Technique for linear classification (default: %(default)s)",
     )

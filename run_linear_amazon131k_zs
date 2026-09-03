@@ -1,0 +1,20 @@
+#!/bin/bash
+#SBATCH --job-name=amazon131k_zs         # Job name
+#SBATCH --output=output.%A_%a.txt         # Standard output and error log
+#SBATCH --nodes=1                         # Run all processes on a single node
+#SBATCH --ntasks=1                        # Run on a single CPU
+#SBATCH --mem=150G                        # Total RAM to be used
+#SBATCH --cpus-per-task=128               # Number of CPU cores
+#SBATCH -p cscc-cpu-p                     # Use the CPU partition
+#SBATCH --time=12:00:00                   # Time needed for the experiment
+#SBATCH --qos=cscc-cpu-qos
+
+hostname
+
+python3 main.py --data_name amazon131k_zs \
+    --model_name tree \
+    --training_file /nfs-stor/linh.vu/LF-Amazon-131K-ZS/LF-Amazon-131K/zeroshot/LF-Amazon-131K_tfidf_train.svm \
+    --test_file /nfs-stor/linh.vu/LF-Amazon-131K-ZS/LF-Amazon-131K/zeroshot/LF-Amazon-131K_tfidf_test.svm \
+    --linear --linear_technique tree \
+    --result_dir /nfs-stor/linh.vu/runs \
+    --data_format svm

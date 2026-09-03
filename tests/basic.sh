@@ -17,6 +17,8 @@
 #       tests/basic.sh rcv1
 #######################################
 
+python -m unittest discover -s tests -p "test_*.py" -v || exit 1
+
 result_dir="/tmp/libmultilabel-test-$(whoami)/runs"
 datasets=(
     AmazonCat-13K

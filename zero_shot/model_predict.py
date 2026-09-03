@@ -5,7 +5,10 @@ Usage:
     --test_instance_data_path=<test_data> \
     --label_feature_path=<label_data> \
     --run_name=<run_name_str> \
-    --strategy=<strategy_str>
+    --strategy=<strategy_str> \
+    [--propensity_a=<a>] \
+    [--propensity_b=<b>] \
+    [--save_prediction_cache]
 
 Options:
     --model_path=<model_path>                Path to the model file (string).
@@ -14,416 +17,524 @@ Options:
     --label_feature_path=<label_features>    Path to the label data file (string).
     --run_name=<run_name_str>                Name of the run (string).
     --strategy=<strategy_str>                Strategy for prediction (string).
+    --propensity_a=<a>                       PSP propensity parameter A [default: 0.55].
+    --propensity_b=<b>                       PSP propensity parameter B [default: 1.5].
+    --save_prediction_cache                  Save and reuse intermediate batch predictions.
 """
+
 import json
-import sys
-import os
-
-# Add the parent directory to sys.path
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(parent_dir)
-
 import math
+import os
 import pickle
-import numpy as np
-import scipy.sparse as sparse
-import libmultilabel.linear as linear
-from liblinear.liblinearutil import predict
+import sys
+import time
 
-from time import time
-from functools import partial
+# Allow this script to import LibMultiLabel when run from zero_shot/.
+SCRIPT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIRECTORY)
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
+
+import numpy as np
+import torch
+import torch.nn as nn
 from docopt import docopt
 from sklearn.datasets import load_svmlight_file
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import MultiLabelBinarizer
-from sklearn.metrics.pairwise import cosine_similarity
-from scipy.optimize import minimize
-import time
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import libmultilabel.linear as linear
 
-def load_svm_data(file_path, /, *args, **keywords):
-    """
-    A wrapper of load_svmlight_file with arguments with changed default values:
-        - multilabel=True
-        - zero_based=False
 
-    Note: If you pass new values to above arguments, the function's behavior will follow the new values you provided.
-    """
-    _wrapped_func = partial(load_svmlight_file, multilabel=True, zero_based=False)
-    return _wrapped_func(file_path, *args, **keywords)
+BATCH_SIZE = 16
+LABEL_NEIGHBOR_COUNT = 5
+PROXY_NEIGHBOR_COUNT = 3
+RRF_K = 60
+ATTENTION_PROJECTION_DIM = 1024
+LOG_DIRECTORY = os.path.join(SCRIPT_DIRECTORY, "logs")
+
+# Experiment grid. Change these values to run a different search.
+PROXY_TYPES = ("zero",)
+ALPHAS = (1,)
+BETAS = (0.01,)
+METRIC_LIST = (
+    "P@1",
+    "P@3",
+    "P@5",
+    "R@1",
+    "R@3",
+    "R@5",
+    "NDCG@1",
+    "NDCG@3",
+    "NDCG@5",
+    "ZSR@10",
+    "ZSR@50",
+    "ZSR@100",
+    "PSP@1",
+    "PSP@3",
+    "PSP@5",
+)
+
+
+def load_svm_data(file_path, /, *args, **kwargs):
+    """Load one-based, multilabel data in SVMlight format."""
+    kwargs.setdefault("multilabel", True)
+    kwargs.setdefault("zero_based", False)
+    return load_svmlight_file(file_path, *args, **kwargs)
+
 
 def predict_values_by_tfidf(instance_tfidf, label_tfidf):
-    """Calculates the similarity scores between instance and label tfidf vectors.
-
-        Args:
-            instance_tfidf (sparse.csr_matrix): A matrix of shape (#instances, #features).
-            label_tfidf (sparse.csr_matrix): A matrix of shape (#labels, #features).
-
-        Returns:
-            np.array: A matrix of shape (#instances, #labels).
-    """
-    
+    """Calculate instance-to-label TF-IDF similarity scores."""
     return (instance_tfidf @ label_tfidf.T).toarray()
-        
 
-def metrics_in_batches(X, y, predictor, unseen_labels, metric_list, save_path, label_pos_count, num_instances_train, **kargs_for_predictors):
-    batch_size = 16
-    num_instances = X.shape[0]
-    num_batches = math.ceil(num_instances / batch_size)
 
+def metrics_in_batches(
+    X,
+    y,
+    predictor,
+    unseen_labels,
+    metric_list,
+    cache_path,
+    label_pos_count,
+    num_instances_train,
+    *,
+    propensity_a=0.55,
+    propensity_b=1.5,
+    **predictor_kwargs,
+):
+    """Predict and update metrics without materializing all scores at once."""
+    num_batches = math.ceil(X.shape[0] / BATCH_SIZE)
     metrics = linear.get_metrics(
-        metric_list, 
+        metric_list,
         num_classes=y.shape[1],
         unseen_labels=unseen_labels,
         label_pos_counts=label_pos_count,
-        num_instances=num_instances_train
+        num_instances=num_instances_train,
+        propensity_a=propensity_a,
+        propensity_b=propensity_b,
     )
-    for i in range(num_batches):
-        # orignal
-        preds = predictor.predict_on_all_label(
-            X[i * batch_size : (i + 1) * batch_size], save_path=save_path, batch_num = i,
-            **kargs_for_predictors
-        )
 
-        target = y[i * batch_size : (i + 1) * batch_size].toarray()
-        # compare
-        metrics.update(preds, target)
-    
+    for batch_num in range(num_batches):
+        batch_start = batch_num * BATCH_SIZE
+        batch_end = (batch_num + 1) * BATCH_SIZE
+        predictions = predictor.predict_on_all_label(
+            X[batch_start:batch_end],
+            save_path=cache_path,
+            batch_num=batch_num,
+            **predictor_kwargs,
+        )
+        targets = y[batch_start:batch_end].toarray()
+        metrics.update(predictions, targets)
+
     return metrics.compute()
 
+
 class MixedPredictor:
-    """A mixed predictor can predict on seen and unseen labels."""
+    """Combine supervised predictions for seen labels with zero-shot scores."""
 
     def __init__(
-            self,
-            all_label_map,
-            seen_labels,
-            supervised_model,
-            label_feature,
-            strategy='raw'
-        ):
+        self,
+        all_label_map,
+        seen_labels,
+        supervised_model,
+        label_feature,
+        strategy="raw",
+    ):
         self.all_label_map = all_label_map
-        self.seen_labels = seen_labels # contain indices of seen_labels
-        self.strategy = strategy
+        self.seen_labels = seen_labels
         self.supervised_model = supervised_model
-        self.label_feature = label_feature # tfidf of all label description
-        self.unseen_labels = np.setdiff1d(all_label_map, seen_labels) # contains indices of unseen_labels
+        self.label_feature = label_feature
+        self.strategy = strategy
+
+        self.unseen_labels = np.setdiff1d(all_label_map, seen_labels)
         assert (
-            self.unseen_labels.shape[0] + self.seen_labels.shape[0] 
-            == self.all_label_map.shape[0]
+            self.unseen_labels.shape[0] + self.seen_labels.shape[0] == self.all_label_map.shape[0]
         ), "The set of seen labels should be a subset of all labels."
 
         self.seen_label_feature = label_feature[self.seen_labels]
         self.unseen_label_feature = label_feature[self.unseen_labels]
-        # print("seen label feature:",self.seen_label_feature.shape)
-        self.label_neighbors = self.get_kneighbors() # (n_labels, n_neighbors)
-        # global local here
+        self.label_neighbors = self.get_kneighbors()
 
-    def get_kneighbors(self, n_neighbors=5):
-        neigh = NearestNeighbors(n_neighbors=n_neighbors)
-        neigh.fit(self.seen_label_feature)
-        return neigh.kneighbors(self.label_feature, return_distance=False)
+        self.seen_mask = np.zeros(self.all_label_map.shape[0], dtype=bool)
+        self.seen_mask[self.seen_labels] = True
+        self.unseen_mask = ~self.seen_mask
+
+    def get_kneighbors(self, n_neighbors=LABEL_NEIGHBOR_COUNT):
+        """Return seen-label neighbor indices local to ``self.seen_labels``."""
+        neighbors = NearestNeighbors(n_neighbors=n_neighbors)
+        neighbors.fit(self.seen_label_feature)
+        return neighbors.kneighbors(self.label_feature, return_distance=False)
 
     def predict_values_on_seen_label(self, x):
-        preds = self.supervised_model.predict_values(x)
-        return preds
+        return self.supervised_model.predict_values(x)
 
     def predict_values_on_unseen_label(self, x):
-        preds = predict_values_by_tfidf(x, self.unseen_label_feature)
-        return preds
-    
-    def ranks_of(self, scores):
-        """
-        
-        Double argsort trick to get rank
-        Negating scores, the largest will have smallest rank
-        Example: scores = [0, 1, 30, 15, 100] => negates to scores = [0, -1, -30, -15, -100]
-        x = np.argsort(-scores) = [4, 2, 3, 1, 0]
-        np.argsort(x) = [4, 2, 3, 1, 0]
-        
-        """
+        return predict_values_by_tfidf(x, self.unseen_label_feature)
+
+    @staticmethod
+    def ranks_of(scores):
+        """Convert scores to zero-based ranks, with the largest score ranked first."""
         return np.argsort(np.argsort(-scores, axis=1), axis=1)
 
+    @staticmethod
+    def _cache_paths(save_path, batch_num):
+        cache_directory = os.path.dirname(save_path)
+        return {
+            "s_hat_seen": f"{cache_directory}/s_hat_seen_{batch_num}.npy",
+            "seen_label_doc_sim": f"{cache_directory}/seen_label_doc_sim_{batch_num}.npy",
+            "unseen_label_doc_sim": f"{cache_directory}/unseen_label_doc_sim_{batch_num}.npy",
+        }
+
+    def _get_base_scores(self, x, save_path, batch_num):
+        """Load cached scores when enabled, otherwise compute them for one batch."""
+        cache_paths = self._cache_paths(save_path, batch_num) if save_path else None
+        if cache_paths and all(os.path.exists(path) for path in cache_paths.values()):
+            return (
+                np.load(cache_paths["s_hat_seen"]),
+                np.load(cache_paths["seen_label_doc_sim"]),
+                np.load(cache_paths["unseen_label_doc_sim"]),
+            )
+
+        start_time = time.time()
+        s_hat_seen = self.predict_values_on_seen_label(x)
+        s_hat_seen = 1 / (1 + np.exp(-s_hat_seen))
+        seen_label_doc_sim = predict_values_by_tfidf(x, self.seen_label_feature)
+        unseen_label_doc_sim = predict_values_by_tfidf(x, self.unseen_label_feature)
+        elapsed = time.time() - start_time
+        print(f"predicting on batch {batch_num} took {elapsed:.2f} seconds")
+
+        if cache_paths:
+            cache_directory = os.path.dirname(save_path)
+            os.makedirs(cache_directory, exist_ok=True)
+            np.save(cache_paths["s_hat_seen"], s_hat_seen)
+            np.save(cache_paths["seen_label_doc_sim"], seen_label_doc_sim)
+            np.save(cache_paths["unseen_label_doc_sim"], unseen_label_doc_sim)
+
+        return s_hat_seen, seen_label_doc_sim, unseen_label_doc_sim
+
+    def _expand_base_scores(self, predictions, s_hat_seen, seen_label_doc_sim, unseen_label_doc_sim):
+        """Place seen and unseen scores in arrays spanning the global label space."""
+        s_hat_full = np.full_like(predictions, -np.inf)
+        s_hat_full[:, self.seen_mask] = s_hat_seen
+
+        doc_sim_full = np.full_like(predictions, -np.inf)
+        doc_sim_full[:, self.seen_mask] = seen_label_doc_sim
+        doc_sim_full[:, self.unseen_mask] = unseen_label_doc_sim
+        return s_hat_full, doc_sim_full
+
+    def _proxy_scores(self, x, proxy_type, predictions, s_hat_full):
+        """Build supervised proxy scores for unseen labels."""
+        proxy = np.zeros((x.shape[0], self.unseen_labels.shape[0]))
+
+        if proxy_type == "zero":
+            return proxy
+
+        if proxy_type == "insert_closest":
+            nearest_seen_local = self.label_neighbors[self.unseen_labels, 0]
+            nearest_seen_global = self.seen_labels[nearest_seen_local]
+            delta_feature = self.unseen_label_feature - self.seen_label_feature[nearest_seen_local]
+            if hasattr(x, "dot"):
+                score_difference = x.dot(delta_feature.T)
+            else:
+                score_difference = x @ delta_feature.T
+            sign = np.sign(score_difference.toarray())
+            proxy = s_hat_full[:, nearest_seen_global] + sign * 1e-8
+            s_hat_full[:, self.unseen_labels] = proxy
+            return proxy
+
+        if proxy_type == "avg":
+            nearest_seen_local = self.label_neighbors[self.unseen_labels, :PROXY_NEIGHBOR_COUNT]
+            nearest_seen_global = self.seen_labels[nearest_seen_local]
+            proxy = np.average(s_hat_full[:, nearest_seen_global], axis=2)
+            s_hat_full[:, self.unseen_labels] = proxy
+            return proxy
+
+        if proxy_type == "weighted_avg":
+            nearest_seen_labels = self.label_neighbors[self.unseen_labels, :PROXY_NEIGHBOR_COUNT]
+            distances, _ = (
+                NearestNeighbors(n_neighbors=PROXY_NEIGHBOR_COUNT)
+                .fit(self.seen_label_feature)
+                .kneighbors(self.unseen_label_feature)
+            )
+            similarities = 1 / (distances + 1e-10)
+            weights = similarities / np.sum(similarities, axis=1, keepdims=True)
+            return np.sum(predictions[:, nearest_seen_labels] * weights[None, :, :], axis=2)
+
+        if proxy_type == "attention":
+            key = nn.Linear(self.seen_label_feature.shape[1], ATTENTION_PROJECTION_DIM, bias=False)
+            query = nn.Linear(self.unseen_label_feature.shape[1], ATTENTION_PROJECTION_DIM, bias=False)
+            seen_label_tensor = torch.tensor(self.seen_label_feature.toarray(), dtype=torch.float32)
+            unseen_label_tensor = torch.tensor(self.unseen_label_feature.toarray(), dtype=torch.float32)
+            weights = torch.softmax(query(unseen_label_tensor) @ key(seen_label_tensor).T, dim=-1)
+            return predictions[:, self.seen_labels] @ weights.detach().numpy().T
+
+        if proxy_type == "min":
+            nearest_seen_labels = self.label_neighbors[self.unseen_labels, :PROXY_NEIGHBOR_COUNT]
+            return np.min(predictions[:, nearest_seen_labels], axis=2)
+
+        raise ValueError("Unknown proxy type for unseen labels")
+
+    def _combine_scores(
+        self,
+        predictions,
+        proxy_type,
+        alpha,
+        beta,
+        s_hat_seen,
+        seen_label_doc_sim,
+        unseen_label_doc_sim,
+        proxy,
+        s_hat_ranks,
+        doc_ranks,
+    ):
+        """Fuse supervised, proxy, and document-similarity scores."""
+        if self.strategy == "raw":
+            predictions[:, self.seen_labels] = alpha * s_hat_seen + (1 - alpha) * seen_label_doc_sim
+            if proxy_type == "zero":
+                predictions[:, self.unseen_labels] = (1 - beta) * unseen_label_doc_sim
+            else:
+                predictions[:, self.unseen_labels] = beta * proxy + (1 - beta) * unseen_label_doc_sim
+
+        elif self.strategy == "rank_rrf":
+            predictions[:, self.seen_mask] = alpha * (1.0 / (s_hat_ranks[:, self.seen_mask] + RRF_K)) + (1 - alpha) * (
+                1.0 / (doc_ranks[:, self.seen_mask] + RRF_K)
+            )
+            if proxy_type == "zero":
+                predictions[:, self.unseen_mask] = (1 - beta) * (1.0 / (doc_ranks[:, self.unseen_mask] + RRF_K))
+            else:
+                predictions[:, self.unseen_mask] = beta * (1.0 / (s_hat_ranks[:, self.unseen_mask] + RRF_K)) + (
+                    1 - beta
+                ) * (1.0 / (doc_ranks[:, self.unseen_mask] + RRF_K))
+
+        elif self.strategy == "rank_normal":
+            num_labels = predictions.shape[1]
+            predictions[:, self.seen_mask] = alpha * (1.0 - s_hat_ranks[:, self.seen_mask] / num_labels) + (
+                1 - alpha
+            ) * (1.0 - doc_ranks[:, self.seen_mask] / num_labels)
+            if proxy_type == "zero":
+                predictions[:, self.unseen_mask] = (1 - beta) * (1.0 - doc_ranks[:, self.unseen_mask] / num_labels)
+            else:
+                predictions[:, self.unseen_mask] = beta * (1.0 - s_hat_ranks[:, self.unseen_mask] / num_labels) + (
+                    1 - beta
+                ) * (1.0 - doc_ranks[:, self.unseen_mask] / num_labels)
+
+        return predictions
 
     def predict_on_all_label(self, x, alpha, beta, proxy_type, save_path=None, batch_num=None):
-        """
-        Predict the values for all labels based on the unified framework,
-        given as
-            scores_seen = alpha * s_hat_seen + (1-alpha) * label_doc_sim_seen
-            scores_unseen = beta * proxy + (1-beta) * label_doc_sim_unseen
+        """Predict all seen and unseen labels for a batch of instances."""
+        predictions = np.zeros((x.shape[0], self.all_label_map.shape[0]))
+        s_hat_seen, seen_label_doc_sim, unseen_label_doc_sim = self._get_base_scores(x, save_path, batch_num)
+        s_hat_full, doc_sim_full = self._expand_base_scores(
+            predictions,
+            s_hat_seen,
+            seen_label_doc_sim,
+            unseen_label_doc_sim,
+        )
+        proxy = self._proxy_scores(x, proxy_type, predictions, s_hat_full)
+        s_hat_ranks = self.ranks_of(s_hat_full)
+        doc_ranks = self.ranks_of(doc_sim_full)
+        return self._combine_scores(
+            predictions,
+            proxy_type,
+            alpha,
+            beta,
+            s_hat_seen,
+            seen_label_doc_sim,
+            unseen_label_doc_sim,
+            proxy,
+            s_hat_ranks,
+            doc_ranks,
+        )
 
-            Args:
-                alpha (float): a number in [0, 1]
-                beta (float): a number in [0, 1]
-                proxy_type (str): could be one of the following
-                    "zero": 
-                    "insert_closest":
-                    "avg":
-                    "min":
-                    "period":
 
-        """
-        
-        preds = np.zeros((x.shape[0], self.all_label_map.shape[0]))
-        
-        save_path = os.path.dirname(save_path)
+def parse_arguments():
+    """Parse command-line arguments using the module docstring."""
+    return docopt(__doc__)
 
-        # check if the last files exsist, if all of them exists, good, load them
-        if os.path.exists(f"{save_path}/s_hat_seen_{batch_num}.npy"):
-            # if batch_num % 100 == 0:
-            #     print(f"loading the {batch_num}th batch")
-            s_hat_seen = np.load(f"{save_path}/s_hat_seen_{batch_num}.npy")
-            seen_label_doc_sim = np.load(f"{save_path}/seen_label_doc_sim_{batch_num}.npy")
-            unseen_label_doc_sim = np.load(f"{save_path}/unseen_label_doc_sim_{batch_num}.npy")
-        else:
-            start_time = time.time()
-            s_hat_seen = self.predict_values_on_seen_label(x)
-            s_hat_seen = 1 / (1 + np.exp(-s_hat_seen))
-            # normalize without sigmoid
-            # s_hat_seen = (s_hat_seen - np.min(s_hat_seen, axis=1 , keepdims=True)) / \
-            #     (np.max(s_hat_seen, axis=1, keepdims=True) - np.min(s_hat_seen, axis=1, keepdims=True) + 1e-10)
-            seen_label_doc_sim = predict_values_by_tfidf(x, self.seen_label_feature)
-            unseen_label_doc_sim = predict_values_by_tfidf(x, self.unseen_label_feature)
-            end_time = time.time()
-            print(f"predicting on batch {batch_num} took {end_time - start_time:.2f} seconds")
-            # save the results
-            if save_path is not None:
-                if not os.path.exists(save_path):
-                    os.makedirs(save_path)
-                np.save(f"{save_path}/s_hat_seen_{batch_num}.npy", s_hat_seen)
-                np.save(f"{save_path}/seen_label_doc_sim_{batch_num}.npy", seen_label_doc_sim)
-                np.save(f"{save_path}/unseen_label_doc_sim_{batch_num}.npy", unseen_label_doc_sim)
-            
-        n_labels = preds.shape[1]
-        mask_seen = np.zeros(n_labels, dtype=bool) # creat mask for seen labelss
-        mask_seen[self.seen_labels] = True # set indices of seen labels to True
-        mask_unseen = ~mask_seen # set indices of unseen labels to True
-        s_hat_full = np.full_like(preds, -np.inf)
-        s_hat_full[:, mask_seen] = s_hat_seen # putting supervised scores into s_hat_full
-        doc_sim_full = np.full_like(preds, -np.inf)
-        doc_sim_full[:, mask_seen]  = seen_label_doc_sim
-        doc_sim_full[:, mask_unseen] = unseen_label_doc_sim
-        
-        # print shapes
-        # if batch_num % 100 == 0:
-            # print(f"s_hat_seen shape: {s_hat_seen.shape}"
-            #     f", seen_label_doc_sim shape: {seen_label_doc_sim.shape}"
-            #     f", unseen_label_doc_sim shape: {unseen_label_doc_sim.shape}"
-            #     f", x shape: {x.shape}")
 
-        proxy = np.zeros((x.shape[0], self.unseen_labels.shape[0]))
-        
-        # proxy selection
-        if proxy_type == "zero":
-            pass
-        elif proxy_type == "insert_closest":
-            nearest_seen_local  = self.label_neighbors[self.unseen_labels, 0] # local in seen set
-            nearest_seen_global = self.seen_labels[nearest_seen_local]  
-            delta_feat = (self.unseen_label_feature - self.seen_label_feature[nearest_seen_local])
-            if hasattr(x, "dot"):   # works for scipy.sparse or numpy
-                score_diff = x.dot(delta_feat.T)
-            else:
-                score_diff = x @ delta_feat.T
-            sign = np.sign(score_diff.toarray())
-            proxy = s_hat_full[:,nearest_seen_global] + sign * 1e-8
-            s_hat_full[:, self.unseen_labels] = proxy            
-        elif proxy_type == "avg":
-            nearest_seen_local = self.label_neighbors[self.unseen_labels, :3]
-            nearest_seen_global = self.seen_labels[nearest_seen_local]  
-            # shape: (n_instances, n_unseen labels, n_nearest neighbors)
-            proxy = np.average(s_hat_full[:,nearest_seen_global], axis=2)
-            s_hat_full[:, self.unseen_labels] = proxy
-        elif proxy_type == "weighted_avg":
-            nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
-            distances, _ = NearestNeighbors(n_neighbors=3).fit(self.seen_label_feature).kneighbors(self.unseen_label_feature)
-            similarities = 1 / (distances + 1e-10)
-            weight_sum = np.sum(similarities, axis=1, keepdims=True)
-            weights = similarities / weight_sum
-            proxy = np.sum(preds[:,nearest_seen_labels] * weights[None, :, :], axis=2)   
-        elif proxy_type == "attention":
-            D_proj = 1024
-            key = nn.Linear(self.seen_label_feature.shape[1], D_proj, bias=False)
-            query = nn.Linear(self.unseen_label_feature.shape[1], D_proj, bias=False)
-            # value = nn.Linear(self.seen_label_feature.shape[1], D_proj, bias=False)
-            
-            seen_label_tensor_dense = self.seen_label_feature.toarray()
-            unseen_label_tensor_dense = self.unseen_label_feature.toarray()
-            # x_dense = x.toarray()
-            
-            seen_label_tensor = torch.tensor(seen_label_tensor_dense, dtype=torch.float32)
-            unseen_label_tensor = torch.tensor(unseen_label_tensor_dense, dtype=torch.float32)
-            # x = torch.tensor(x_dense, dtype=torch.float32)
-            
-            k = key(seen_label_tensor)
-            q = query(unseen_label_tensor)
-            
-            weight = q @ k.T
-            weight = torch.softmax(weight, dim=-1)
-            weight = weight.detach().numpy()
+def print_arguments(args):
+    print(f"Model Path: {args['--model_path']}")
+    print(f"Train Instance Data Path: {args['--train_instance_data_path']}")
+    print(f"Test Instance Data Path: {args['--test_instance_data_path']}")
+    print(f"Label Feature Path: {args['--label_feature_path']}")
+    print(f"PSP propensity A: {args['--propensity_a']}")
+    print(f"PSP propensity B: {args['--propensity_b']}")
+    print(f"Prediction cache: {'enabled' if args['--save_prediction_cache'] else 'disabled'}")
 
-            proxy = preds[:,self.seen_labels] @ weight.T # goal is (256, 74)    
-        elif proxy_type == "min":
-            # bad performance
-            nearest_seen_labels = self.label_neighbors[self.unseen_labels, :3]
-            proxy = np.min(preds[:,nearest_seen_labels], axis=2)
-        else:
-            raise ValueError("Unknown proxy type for unseen labels")
-        
-        r_s_hat = self.ranks_of(s_hat_full)
-        r_doc   = self.ranks_of(doc_sim_full)
-        
-        if self.strategy == 'raw':
-            preds[:,self.seen_labels] = \
-                alpha * s_hat_seen + (1-alpha) * seen_label_doc_sim                
-            # prediction for unseen labels
-            if proxy_type == 'zero':
-                preds[:,self.unseen_labels] = (1-beta) * unseen_label_doc_sim
-            else:
-                preds[:,self.unseen_labels] = beta * proxy + (1-beta) * unseen_label_doc_sim         
-        elif self.strategy == 'rank_rrf':
-            k = 60
-            preds[:, mask_seen] = (
-                alpha * (1.0 / (r_s_hat[:, mask_seen] + k)) +
-                (1 - alpha) * (1.0 / (r_doc[:, mask_seen]   + k))
-            )
-            if proxy_type == 'zero':
-                preds[:, mask_unseen] = (1 - beta) * (1.0 / (r_doc[:, mask_unseen] + k))
-            else:
-                preds[:, mask_unseen] = (
-                    beta * (1.0 / (r_s_hat[:, mask_unseen] + k)) +  # proxy term
-                    (1 - beta) * (1.0 / (r_doc[:,   mask_unseen] + k))
+
+def load_model(model_path):
+    """Load the trained linear model and report its load time."""
+    start_time = time.time()
+    with open(model_path, "rb") as model_file:
+        print(model_path)
+        model = pickle.load(model_file)["model"]
+    print(f"Model loaded in {time.time() - start_time:.2f} seconds.")
+    return model
+
+
+def load_experiment_data(model, train_data_path, test_data_path, label_feature_path):
+    """Load train/test instances and label features."""
+    if model.name == "1vsrest":
+        num_model_features = model.weights.shape[0]
+    else:
+        print("Tree model")
+        num_model_features = model.flat_model.weights.shape[0]
+
+        X_train, y_train = load_svm_data(
+            train_data_path, n_features=num_model_features
+        )
+        X_test, y_test = load_svm_data(
+            test_data_path, n_features=num_model_features
+        )
+        X_label, _ = load_svm_data(
+            label_feature_path, n_features=num_model_features
+        )
+    return X_train, y_train, X_test, y_test, X_label
+
+
+def count_label_positives(y_train, num_labels):
+    """Count positive training instances for each label."""
+    label_pos_count = np.zeros(num_labels, dtype=int)
+    for labels in y_train:
+        for label in labels:
+            label_pos_count[int(label)] += 1
+    return label_pos_count
+
+
+def binarize_labels(y_train, y_test, num_labels):
+    """Convert iterable label IDs to sparse indicator matrices."""
+    binarizer = MultiLabelBinarizer(
+        classes=np.arange(num_labels, dtype="float"),
+        sparse_output=True,
+    )
+    binarizer.fit(y_train + y_test)
+    return binarizer.transform(y_train), binarizer.transform(y_test)
+
+
+def run_experiments(
+    X_test,
+    y_test,
+    predictor,
+    unseen_labels,
+    prediction_cache_path,
+    run_name,
+    label_pos_count,
+    num_instances_train,
+    shared_timing_seconds,
+    *,
+    propensity_a=0.55,
+    propensity_b=1.5,
+):
+    """Evaluate every configured proxy/alpha/beta combination and write logs."""
+    os.makedirs(LOG_DIRECTORY, exist_ok=True)
+
+    for proxy_type in PROXY_TYPES:
+        evaluation_start_time = time.perf_counter()
+        logs = {
+            "alpha": [],
+            "beta": [],
+            "propensity_a": propensity_a,
+            "propensity_b": propensity_b,
+            "prediction_cache_enabled": prediction_cache_path is not None,
+            "full_metrics": [],
+        }
+
+        for alpha in ALPHAS:
+            for beta in BETAS:
+                if alpha < beta:
+                    continue
+
+                metric_dict = metrics_in_batches(
+                    X_test,
+                    y_test,
+                    predictor,
+                    unseen_labels,
+                    METRIC_LIST,
+                    prediction_cache_path,
+                    label_pos_count=label_pos_count,
+                    num_instances_train=num_instances_train,
+                    propensity_a=propensity_a,
+                    propensity_b=propensity_b,
+                    alpha=alpha,
+                    beta=beta,
+                    proxy_type=proxy_type,
                 )
-        elif self.strategy == 'rank_normal':
-            preds[:, mask_seen] = (
-                alpha * (1.0 - r_s_hat[:, mask_seen] / preds.shape[1]) +
-                (1 - alpha) * (1.0 - r_doc[:, mask_seen]   / preds.shape[1])
-            )
-            if proxy_type == 'zero':
-                preds[:, mask_unseen] = (1 - beta) * (1.0 - r_doc[:, mask_unseen] / preds.shape[1])
-            else:
-                preds[:, mask_unseen] = (
-                    beta * (1.0 - r_s_hat[:, mask_unseen] / preds.shape[1]) +  # proxy term
-                    (1 - beta) * (1.0 - r_doc[:,   mask_unseen] / preds.shape[1])
-                )
-        return preds
+                logs["alpha"].append(alpha)
+                logs["beta"].append(beta)
+                logs["full_metrics"].append({metric: metric_dict[metric] for metric in METRIC_LIST})
 
+                title = f"a={alpha} b={beta}, proxy={proxy_type} Test"
+                print(linear.tabulate_metrics(metric_dict, title), flush=True)
+
+        timing_seconds = dict(shared_timing_seconds)
+        timing_seconds["evaluation"] = time.perf_counter() - evaluation_start_time
+        timing_seconds["total"] = sum(timing_seconds.values())
+        logs["timing_seconds"] = timing_seconds
+
+        log_filename = f"logs_{proxy_type}_{run_name}_updatedPSP.json"
+        log_path = os.path.join(LOG_DIRECTORY, log_filename)
+        with open(log_path, "w") as log_file:
+            json.dump(logs, log_file)
+        print(f"wrote to {log_path}")
 
 
 def main():
-    # Parse command-line arguments
-    args = docopt(__doc__)
-
-    # Accessing the arguments
-    model_path = args['--model_path']
-    train_data_path = args['--train_instance_data_path']
-    test_data_path = args['--test_instance_data_path']
-    label_feature_path = args['--label_feature_path']
-    run_name = args['--run_name']
-    strategy = args['--strategy'] if '--strategy' in args else 'raw'
-    
-    # Print the parsed arguments (for debugging purposes)
-    print(f"Model Path: {model_path}")
-    print(f"Train Instance Data Path: {train_data_path}")
-    print(f"Test Instance Data Path: {test_data_path}")
-    print(f"Label Feature Path: {label_feature_path}")
-    
+    args = parse_arguments()
+    print_arguments(args)
     print("Start processing...")
 
-    start_time = time.time()
-    # Load models and data
-    with open(model_path, "rb") as _F:
-        print(model_path)
-        model = pickle.load(_F)['model']
-    end_time = time.time()
-    print(f"Model loaded in {end_time - start_time:.2f} seconds.")
+    propensity_a = float(args["--propensity_a"])
+    propensity_b = float(args["--propensity_b"])
+    prediction_cache_path = args["--model_path"] if args["--save_prediction_cache"] else None
 
-    # model.flat_model.weights.shape: (n_features, n_classifiers)
-    if model.name == '1vsrest':
-        X_train, y_train = load_svm_data(
-            train_data_path, n_features=model.weights.shape[0])
-    else:
-        X_train, y_train = load_svm_data(
-            train_data_path, n_features=model.flat_model.weights.shape[0])
-    
-    X_test, y_test = load_svm_data(test_data_path, n_features=X_train.shape[1])
-    X_label, _ = load_svm_data(label_feature_path, n_features=X_train.shape[1])
-    # y_test is a list [[label1, label2], [label3], ...]
+    model_loading_start_time = time.perf_counter()
+    model = load_model(args["--model_path"])
+    model_loading_time = time.perf_counter() - model_loading_start_time
 
-    lj = np.zeros((X_label.shape[0],), dtype=int)
-    # at the jth label, how many instances
+    dataset_loading_start_time = time.perf_counter()
+    X_train, y_train, X_test, y_test, X_label = load_experiment_data(
+        model,
+        args["--train_instance_data_path"],
+        args["--test_instance_data_path"],
+        args["--label_feature_path"],
+    )
+    dataset_loading_time = time.perf_counter() - dataset_loading_start_time
 
-    for labels in y_train:
-        for label in labels:
-            lj[int(label)] += 1
-
-
-    binarizer = MultiLabelBinarizer(
-        classes=np.arange(X_label.shape[0], dtype="float"), sparse_output=True)
-    # binarizer = MultiLabelBinarizer(sparse_output=True)
-    binarizer.fit(y_train + y_test)
-    y_train = binarizer.transform(y_train)
-    y_test = binarizer.transform(y_test)
+    setup_start_time = time.perf_counter()
+    num_labels = X_label.shape[0]
+    label_pos_count = count_label_positives(y_train, num_labels)
+    y_train, y_test = binarize_labels(y_train, y_test, num_labels)
     seen_labels = np.nonzero(np.sum(y_train, axis=0)[0])[1]
-    unseen_labels = np.setdiff1d(
-        np.arange(X_label.shape[0], dtype="int"), seen_labels)
-    
-    
-    num_instances = X_train.shape[0]
+    all_labels = np.arange(num_labels, dtype="int")
+    unseen_labels = np.setdiff1d(all_labels, seen_labels)
 
-    # Init a mixed predictor
-    mixed_predictor = MixedPredictor(
-        np.arange(X_label.shape[0], dtype="int"),
+    predictor = MixedPredictor(
+        all_labels,
         seen_labels,
         model,
         X_label,
-        strategy
+        args["--strategy"],
     )
-    
-    proxy_types = ["insert_closest", "avg", "zero"]
-    
-    alphas = [1]
-    betas = [0.05, 0.15, 0.2, 0.3]
-    
-    metric_list = [
-        "P@1", "P@3", "P@5",
-        "R@1", "R@3", "R@5",
-        "NDCG@1", "NDCG@3", "NDCG@5",
-         "ZSR@10", "ZSR@50", "ZSR@100",
-         "PSP@1", "PSP@3", "PSP@5"]
-    
-    for proxy_type in proxy_types:
-        logs = {'alpha': [], 'beta': [], 'full_metrics': []}
-        for alpha in alphas:
-            for beta in betas:
-                if alpha < beta:
-                    continue
-                # run hyperparameter finding    
-                metric_dict = metrics_in_batches(
-                    X_test, y_test, mixed_predictor, unseen_labels, metric_list, model_path,
-                    label_pos_count=lj, num_instances_train=num_instances,
-                    alpha=alpha, beta=beta, proxy_type=proxy_type)
-                
-                # store the metrics to a list then append to full_metrics
-                full_metrics = {}
-                for metric in metric_list:
-                    full_metrics[metric] = metric_dict[metric]
-                    
-                logs['alpha'].append(alpha)
-                logs['beta'].append(beta)
-                logs['full_metrics'].append(full_metrics)
-                
-                print(linear.tabulate_metrics(
-                        metric_dict, 
-                        f"a={alpha} b={beta}, proxy={proxy_type} Test"), flush=True)
-        # save logs as json
-        
-        with open(f'logs_{proxy_type}_{run_name}.json', 'w') as f:
-            json.dump(logs, f)
-        print(f"wrote to logs_{proxy_type}_{run_name}.json")
+    setup_time = time.perf_counter() - setup_start_time
+
+    run_experiments(
+        X_test,
+        y_test,
+        predictor,
+        unseen_labels,
+        prediction_cache_path,
+        args["--run_name"],
+        label_pos_count,
+        X_train.shape[0],
+        shared_timing_seconds={
+            "model_loading": model_loading_time,
+            "dataset_loading": dataset_loading_time,
+            "setup": setup_time,
+        },
+        propensity_a=propensity_a,
+        propensity_b=propensity_b,
+    )
+
 
 if __name__ == "__main__":
     main()
-

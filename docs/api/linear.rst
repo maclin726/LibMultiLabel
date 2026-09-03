@@ -69,10 +69,16 @@ The possible metric names are:
 * ``'R@K'``, where ``K`` is a positive integer
 * ``'RP@K'``, where ``K`` is a positive integer
 * ``'NDCG@K'``, where ``K`` is a positive integer
+* ``'PSP@K'``, normalized propensity-scored precision, where ``K`` is a
+  positive integer
 * ``'Macro-F1'``
 * ``'Micro-F1'``
 
 Their definitions are given in the `implementation document <https://www.csie.ntu.edu.tw/~cjlin/papers/libmultilabel/libmultilabel_implementation.pdf>`_.
+
+``PSP@K`` returns a fraction and requires ``label_pos_counts`` and
+``num_instances`` from the training set. Dataset-specific propensity parameters
+can be supplied with ``propensity_a`` and ``propensity_b``.
 
 .. autofunction:: compute_metrics
 
