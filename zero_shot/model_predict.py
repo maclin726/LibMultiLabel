@@ -380,15 +380,16 @@ def load_experiment_data(model, train_data_path, test_data_path, label_feature_p
         print("Tree model")
         num_model_features = model.flat_model.weights.shape[0]
 
-        X_train, y_train = load_svm_data(
-            train_data_path, n_features=num_model_features
-        )
-        X_test, y_test = load_svm_data(
-            test_data_path, n_features=num_model_features
-        )
-        X_label, _ = load_svm_data(
-            label_feature_path, n_features=num_model_features
-        )
+    X_train, y_train = load_svm_data(
+        train_data_path, n_features=num_model_features
+    )
+    X_test, y_test = load_svm_data(
+        test_data_path, n_features=num_model_features
+    )
+    X_label, _ = load_svm_data(
+        label_feature_path, n_features=num_model_features
+    )
+    
     return X_train, y_train, X_test, y_test, X_label
 
 

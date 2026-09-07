@@ -39,7 +39,7 @@ done
 hostname
 echo "Run name: $RUN_NAME"
 
-python3 tfidf_raw.py \
+python3 model_tfidf_predict.py \
     --model_path "$MODEL_PATH" \
     --train_instance_data_path "$TRAIN_INSTANCE_DATA_PATH" \
     --test_instance_data_path "$TEST_INSTANCE_DATA_PATH" \
