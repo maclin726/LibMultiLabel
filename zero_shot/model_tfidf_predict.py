@@ -62,6 +62,24 @@ def load_svm_data(file_path, /, *args, **kwargs):
     kwargs.setdefault("zero_based", False)
     return load_svmlight_file(file_path, *args, **kwargs)
 
+def load_svm_features_keep_empty(file_path):
+    """Load SVMlight rows while preserving blank zero-feature rows."""
+    with open(file_path, "r") as data_file:
+        empty_rows = [not line.strip() for line in data_file]
+
+    nonempty_features, _ = load_svm_data(file_path)
+    num_features = nonempty_features.shape[1]
+    rows = []
+    nonempty_index = 0
+    for is_empty in empty_rows:
+        if is_empty:
+            rows.append(sparse.csr_matrix((1, num_features), dtype=nonempty_features.dtype))
+        else:
+            rows.append(nonempty_features[nonempty_index])
+            nonempty_index += 1
+
+    return sparse.vstack(rows, format="csr")
+
 
 def predict_values_by_tfidf(instance_tfidf, label_tfidf):
     """Calculate instance-to-label TF-IDF similarity scores."""
@@ -147,7 +165,7 @@ def load_experiment_data(train_data_path, test_data_path, label_feature_path):
     """Load and align train, test, and label-feature matrices."""
     X_train, y_train = load_svm_data(train_data_path)
     X_test, y_test = load_svm_data(test_data_path)
-    X_label, _ = load_svm_data(label_feature_path)
+    X_label, _ = load_svm_features_keep_empty(label_feature_path)
 
     num_features = max(X_train.shape[1], X_test.shape[1], X_label.shape[1])
     X_train = pad_feature_matrix(X_train, num_features)
