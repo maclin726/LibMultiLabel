@@ -40,6 +40,7 @@ import torch
 import torch.nn as nn
 from docopt import docopt
 from sklearn.datasets import load_svmlight_file
+import scipy.sparse as sparse
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import MultiLabelBinarizer
 
@@ -81,6 +82,24 @@ def load_svm_data(file_path, /, *args, **kwargs):
     kwargs.setdefault("multilabel", True)
     kwargs.setdefault("zero_based", False)
     return load_svmlight_file(file_path, *args, **kwargs)
+
+def load_svm_features_keep_empty(file_path):
+    """Load SVMlight rows while preserving blank zero-feature rows."""
+    with open(file_path, "r") as data_file:
+        empty_rows = [not line.strip() for line in data_file]
+
+    nonempty_features, _ = load_svm_data(file_path)
+    num_features = nonempty_features.shape[1]
+    rows = []
+    nonempty_index = 0
+    for is_empty in empty_rows:
+        if is_empty:
+            rows.append(sparse.csr_matrix((1, num_features), dtype=nonempty_features.dtype))
+        else:
+            rows.append(nonempty_features[nonempty_index])
+            nonempty_index += 1
+
+    return sparse.vstack(rows, format="csr")
 
 
 def predict_values_by_tfidf(instance_tfidf, label_tfidf):
@@ -386,7 +405,7 @@ def load_experiment_data(model, train_data_path, test_data_path, label_feature_p
     X_test, y_test = load_svm_data(
         test_data_path, n_features=num_model_features
     )
-    X_label, _ = load_svm_data(
+    X_label, _ = load_svm_data( # load_svm_features_keep_empty possibly change to this
         label_feature_path, n_features=num_model_features
     )
     

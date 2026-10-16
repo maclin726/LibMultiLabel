@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --mem=128G
+#SBATCH --cpus-per-task=32
+#SBATCH --partition=cscc-cpu-p
+#SBATCH --time=48:00:00
+#SBATCH --qos=cscc-cpu-qos
+#SBATCH --output=/nfs-stor/linh.vu/runs/slurm_logs/%x.%j.out
+
+# Single launcher for every zero-shot experiment.
+# Usage: sbatch -J <name> run_zs <mode> <dataset> [strategy]
+#   mode:     train | eval | predict | tfidf | sweep | timing
+#     train    train the tree model with main.py (writes to /nfs-stor/linh.vu/runs)
+#     eval     evaluate the trained tree on seen labels with main.py --eval
+#     predict  zero-shot prediction with model_predict.py (writes zero_shot/logs)
+#     tfidf    TF-IDF-only baseline with model_tfidf_predict.py
+#     sweep    fusion sweep over beta / k (sweep_fusion.py)
+#     timing   train + inference timing and peak memory (time_pipeline.py)
+#   dataset:  eurlex4k | eurlex57k | amazoncat13k | amazontitles131k | amazon131k
+#   strategy: predict mode only: rank_rrf (default) | raw | rank_normal
+# Override resources on the command line, e.g. sbatch --mem=200G for amazon131k train.
+
+set -euo pipefail
+
+readonly MODE="$1"
+readonly DATASET="$2"
+readonly STRATEGY="${3:-rank_rrf}"
+readonly PROJECT_ROOT="/l/users/linh.vu/LibMultiLabel"
+readonly PYTHON="/home/linh.vu/.conda/envs/zeroshot/bin/python"
+readonly NFS="/nfs-stor/linh.vu"
+readonly OUT_ROOT="${NFS}/runs/rebuttal"
+
+case "$DATASET" in
+    eurlex4k)
+        MODEL_PATH="${NFS}/runs/eurlex4k_zs_pecos_tree_20260903133623/linear_pipeline.pickle"
+        TRAIN="${NFS}/EURLEX-4K/zeroshot/eurlex4k_tfidf_train_ext_pecos.svm"
+        TEST="${NFS}/EURLEX-4K/zeroshot/eurlex4k_tfidf_test_ext_pecos.svm"
+        LF="${NFS}/EURLEX-4K/zeroshot/eurlex4k_tfidf_lf_pecos.svm"
+        PROPENSITY_A=0.55; PROPENSITY_B=1.5 ;;
+    eurlex57k)
+        MODEL_PATH="${NFS}/runs/eurlex57k_zs_pecos_tree_20260917171538/linear_pipeline.pickle"
+        TRAIN="${NFS}/EURLEX-57K/zeroshot/eurlex57k_tfidf_train_ext.svm"
+        TEST="${NFS}/EURLEX-57K/zeroshot/eurlex57k_tfidf_test_ext.svm"
+        LF="${NFS}/EURLEX-57K/zeroshot/eurlex57k_tfidf_lf.svm"
+        PROPENSITY_A=0.55; PROPENSITY_B=1.5 ;;
+    amazoncat13k)
+        # No earlier tree run is kept, so the sweep uses the model saved by the timing job.
+        MODEL_PATH="${OUT_ROOT}/timing/amazoncat13k/linear_pipeline.pickle"
+        TRAIN="${NFS}/AmazonCat-13K/zeroshot/AmazonCat-13K_tfidf_train.svm"
+        TEST="${NFS}/AmazonCat-13K/zeroshot/AmazonCat-13K_tfidf_test.svm"
+        LF="${NFS}/AmazonCat-13K/zeroshot/AmazonCat-13K_tfidf_lf.svm"
+        PROPENSITY_A=0.6; PROPENSITY_B=2.6 ;;
+    amazontitles131k)
+        MODEL_PATH="${NFS}/runs/amazontitles131k_zs_tree_20260831133149/linear_pipeline.pickle"
+        TRAIN="${NFS}/LF-AmazonTitle-131K-ZS/zeroshot/LF-AmazonTitles-131K_tfidf_train.svm"
+        TEST="${NFS}/LF-AmazonTitle-131K-ZS/zeroshot/LF-AmazonTitles-131K_tfidf_test.svm"
+        LF="${NFS}/LF-AmazonTitle-131K-ZS/zeroshot/LF-AmazonTitles-131K_tfidf_lf.svm"
+        PROPENSITY_A=0.6; PROPENSITY_B=2.6 ;;
+    amazon131k)
+        MODEL_PATH="${NFS}/runs/amazon131k_zs_tree_20260923002902/linear_pipeline.pickle"
+        TRAIN="${NFS}/LF-Amazon-131K-ZS/zeroshot/LF-Amazon-131K-ZS_tfidf_train.svm"
+        TEST="${NFS}/LF-Amazon-131K-ZS/zeroshot/LF-Amazon-131K-ZS_tfidf_test.svm"
+        LF="${NFS}/LF-Amazon-131K-ZS/zeroshot/LF-Amazon-131K-ZS_tfidf_lf.svm"
+        PROPENSITY_A=0.6; PROPENSITY_B=2.6 ;;
+    *)
+        echo "Unknown dataset: $DATASET" >&2
+        exit 1 ;;
+esac
+
+case "$STRATEGY" in
+    raw | rank_rrf | rank_normal) ;;
+    *)
+        echo "Invalid strategy: $STRATEGY" >&2
+        exit 1 ;;
+esac
+
+required_files=("$TRAIN" "$TEST")
+case "$MODE" in
+    eval) required_files+=("$MODEL_PATH") ;;
+    predict | sweep) required_files+=("$MODEL_PATH" "$LF") ;;
+    tfidf | timing) required_files+=("$LF") ;;
+esac
+for input_file in "${required_files[@]}"; do
+    if [[ ! -f "$input_file" ]]; then
+        echo "Missing input file: $input_file" >&2
+        exit 1
+    fi
+done
+
+hostname
+echo "Mode: $MODE, dataset: $DATASET"
+export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/zero_shot"
+
+case "$MODE" in
+    train)
+        cd "$PROJECT_ROOT"
+        "$PYTHON" main.py --data_name "${DATASET}_zs" \
+            --model_name tree \
+            --training_file "$TRAIN" \
+            --test_file "$TEST" \
+            --linear --linear_technique tree \
+            --result_dir "${NFS}/runs" \
+            --data_format svm ;;
+    eval)
+        cd "$PROJECT_ROOT"
+        "$PYTHON" main.py --data_name "${DATASET}_zs" \
+            --training_file "$TRAIN" \
+            --test_file "$TEST" \
+            --data_format svm \
+            --eval \
+            --checkpoint_path "$MODEL_PATH" \
+            --linear ;;
+    predict)
+        cd "${PROJECT_ROOT}/zero_shot"
+        echo "Strategy: $STRATEGY"
+        "$PYTHON" model_predict.py \
+            --model_path "$MODEL_PATH" \
+            --train_instance_data_path "$TRAIN" \
+            --test_instance_data_path "$TEST" \
+            --label_feature_path "$LF" \
+            --run_name "${DATASET}_zs_${STRATEGY}" \
+            --strategy "$STRATEGY" \
+            --propensity_a "$PROPENSITY_A" \
+            --propensity_b "$PROPENSITY_B" ;;
+    tfidf)
+        cd "${PROJECT_ROOT}/zero_shot"
+        "$PYTHON" model_tfidf_predict.py \
+            --model_path unused \
+            --train_instance_data_path "$TRAIN" \
+            --test_instance_data_path "$TEST" \
+            --label_feature_path "$LF" \
+            --run_name "${DATASET}_zs_tfidf_raw" \
+            --propensity_a "$PROPENSITY_A" \
+            --propensity_b "$PROPENSITY_B" ;;
+    sweep)
+        cd "${PROJECT_ROOT}/zero_shot"
+        "$PYTHON" sweep_fusion.py \
+            --model_path "$MODEL_PATH" \
+            --train_instance_data_path "$TRAIN" \
+            --test_instance_data_path "$TEST" \
+            --label_feature_path "$LF" \
+            --output_path "${OUT_ROOT}/sweep/${DATASET}.json" \
+            --propensity_a "$PROPENSITY_A" \
+            --propensity_b "$PROPENSITY_B" ;;
+    timing)
+        cd "${PROJECT_ROOT}/zero_shot"
+        "$PYTHON" time_pipeline.py \
+            --training_file "$TRAIN" \
+            --test_file "$TEST" \
+            --label_feature_path "$LF" \
+            --output_dir "${OUT_ROOT}/timing/${DATASET}" ;;
+    *)
+        echo "Unknown mode: $MODE" >&2
+        exit 1 ;;
+esac

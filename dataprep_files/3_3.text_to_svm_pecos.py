@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Create PECOS TF-IDF features and SVM files for EURLEX-4K.
+"""Create PECOS TF-IDF features and SVM files for a text dataset.
 
-The EURLEX input files are expected to contain one document per line in this
+The train and test files must contain one document per line in this
 format::
 
     document_id<TAB>space-separated-labels<TAB>document text
+
+Labels must be zero-based integer IDs. Each label ID is the zero-based line
+number of its description in the label-description file.
 
 PECOS fits its TF-IDF preprocessor on the training documents plus the label
 descriptions.  The same preprocessor is then used for the train, test, and
@@ -32,6 +35,8 @@ class DatasetPaths:
     train: Path
     test: Path
     label_descriptions: Path
+    document_encoding: str
+    label_description_encoding: str
 
 
 @dataclass(frozen=True)
@@ -51,7 +56,7 @@ class GeneratedPaths:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create PECOS TF-IDF SVM files for EURLEX-4K."
+        description="Create PECOS TF-IDF SVM files for a text dataset."
     )
     parser.add_argument(
         "-c",
@@ -60,7 +65,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help=(
             "Dataset config containing dataset_path, train_file, test_file, "
-            "and label_description_file."
+            "and label_description_file. The optional document_encoding and "
+            "label_description_encoding fields control input decoding."
         ),
     )
     parser.add_argument(
@@ -125,6 +131,10 @@ def load_dataset_paths(config_path: Path) -> DatasetPaths:
         train=resolve_path(config["train_file"], dataset_dir),
         test=resolve_path(config["test_file"], dataset_dir),
         label_descriptions=resolve_path(config["label_description_file"], dataset_dir),
+        document_encoding=config.get("document_encoding", "utf-8"),
+        label_description_encoding=config.get(
+            "label_description_encoding", "latin-1"
+        ),
     )
     for path in (paths.train, paths.test, paths.label_descriptions):
         if not path.is_file():
@@ -171,12 +181,12 @@ def parse_dataset_line(
 
 
 def prepare_document_text(
-    source_path: Path, output_path: Path
+    source_path: Path, output_path: Path, encoding: str
 ) -> tuple[list[list[str]], set[str]]:
     labels_by_row: list[list[str]] = []
     unique_labels: set[str] = set()
 
-    with source_path.open(encoding="utf-8") as source, output_path.open(
+    with source_path.open(encoding=encoding) as source, output_path.open(
         "w", encoding="utf-8", newline="\n"
     ) as output:
         for line_number, line in enumerate(source, start=1):
@@ -191,8 +201,8 @@ def prepare_document_text(
     return labels_by_row, unique_labels
 
 
-def read_label_descriptions(path: Path) -> list[str]:
-    with path.open(encoding="latin-1") as label_file:
+def read_label_descriptions(path: Path, encoding: str) -> list[str]:
+    with path.open(encoding=encoding) as label_file:
         descriptions = [line.rstrip("\r\n") for line in label_file]
     if not descriptions:
         raise ValueError(f"No label descriptions found in {path}")
@@ -208,7 +218,7 @@ def descriptions_in_mapping_order(
             description_index = int(label)
         except ValueError as error:
             raise ValueError(
-                f"EURLEX label {label!r} is not an integer description index"
+                f"Label {label!r} is not a zero-based integer description index"
             ) from error
         if not 0 <= description_index < len(descriptions):
             raise ValueError(
@@ -243,8 +253,7 @@ def ensure_pecos_is_available() -> None:
     if importlib.util.find_spec("pecos") is None:
         raise ModuleNotFoundError(
             "PECOS is not installed in this Python environment. Run the script "
-            "with the PECOS environment, for example: "
-            "conda run -n zeroshot python tfidf_lf_EURLex-4K.py ..."
+            "from an environment in which PECOS is installed."
         )
 
 
@@ -402,13 +411,17 @@ def main() -> None:
 
     print(f"Dataset directory: {dataset.dataset_dir}")
     train_labels, train_label_set = prepare_document_text(
-        dataset.train, paths.train_text
+        dataset.train, paths.train_text, dataset.document_encoding
     )
-    test_labels, test_label_set = prepare_document_text(dataset.test, paths.test_text)
+    test_labels, test_label_set = prepare_document_text(
+        dataset.test, paths.test_text, dataset.document_encoding
+    )
 
     label_mapping = sorted(train_label_set | test_label_set)
     label_to_id = {label: index for index, label in enumerate(label_mapping)}
-    descriptions = read_label_descriptions(dataset.label_descriptions)
+    descriptions = read_label_descriptions(
+        dataset.label_descriptions, dataset.label_description_encoding
+    )
     ordered_descriptions = descriptions_in_mapping_order(
         label_mapping, descriptions, dataset.label_descriptions
     )

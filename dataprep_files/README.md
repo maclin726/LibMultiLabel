@@ -60,6 +60,8 @@ Configuration fields:
 | `train_file` | Original SVM-text training file. |
 | `test_file` | Original SVM-text test file. |
 | `label_description_file` | Original label-description file. |
+| `document_encoding` | Optional train/test text encoding. Defaults to `utf-8`. |
+| `label_description_encoding` | Optional label-description encoding. Defaults to `latin-1`. |
 | `MAX_FEATURES` | Feature limit used by the scikit-learn TF-IDF utility. A non-positive value means no explicit limit. |
 | `n_labels` | Total label count used as the DEXML label-matrix width. |
 | `percent_zeroshot` | Target fraction of test labels to make unseen during training, such as `0.01` for 1%. |
@@ -110,8 +112,8 @@ SVM files.
 ## 1. Create a zero-shot split
 
 ```bash
-python /nfs-stor/linh.vu/dataprep_files/1.create_zeroshot.py \
-  --config /nfs-stor/linh.vu/dataprep_files/config_amazon131k.json
+python /l/users/linh.vu/LibMultiLabel/dataprep_files/1.create_zeroshot.py \
+  --config /l/users/linh.vu/LibMultiLabel/dataprep_files/config_amazon131k.json
 ```
 
 The script uses a fixed random seed and writes:
@@ -136,8 +138,8 @@ still creating the normalized `zeroshot/` directory.
 Run this after creating `DATASET/zeroshot/`:
 
 ```bash
-python /nfs-stor/linh.vu/dataprep_files/3_1.text_to_svm.py \
-  --config /nfs-stor/linh.vu/dataprep_files/config_amazon131k.json
+python /l/users/linh.vu/LibMultiLabel/dataprep_files/3_1.text_to_svm.py \
+  --config /l/users/linh.vu/LibMultiLabel/dataprep_files/config_amazon131k.json
 ```
 
 The script always reads `trn.txt`, `tst.txt`, and `Y.txt` from
@@ -189,7 +191,7 @@ Run the complete PECOS pipeline with:
 ```bash
 conda activate zeroshot
 
-python /nfs-stor/linh.vu/dataprep_files/3_3.text_to_svm_pecos.py \
+python /l/users/linh.vu/LibMultiLabel/dataprep_files/3_3.text_to_svm_pecos.py \
   --config /path/to/config_dataset_zeroshot.json \
   --output-dir /path/to/DATASET/zeroshot
 ```
@@ -197,7 +199,7 @@ python /nfs-stor/linh.vu/dataprep_files/3_3.text_to_svm_pecos.py \
 Use a different PECOS vectorizer config when needed:
 
 ```bash
-python /nfs-stor/linh.vu/dataprep_files/3_3.text_to_svm_pecos.py \
+python /l/users/linh.vu/LibMultiLabel/dataprep_files/3_3.text_to_svm_pecos.py \
   --config /path/to/config_dataset_zeroshot.json \
   --vectorizer-config /path/to/pecos_tfidf_config.json \
   --output-dir /path/to/DATASET/zeroshot
@@ -221,11 +223,11 @@ Useful reuse options:
 
 ```bash
 # Reuse an existing PECOS model, but regenerate all three matrices.
-python /nfs-stor/linh.vu/dataprep_files/3_3.text_to_svm_pecos.py \
+python /l/users/linh.vu/LibMultiLabel/dataprep_files/3_3.text_to_svm_pecos.py \
   --config /path/to/config.json --reuse-model
 
 # Reuse existing *.tfidf.npz matrices and only regenerate SVM files.
-python /nfs-stor/linh.vu/dataprep_files/3_3.text_to_svm_pecos.py \
+python /l/users/linh.vu/LibMultiLabel/dataprep_files/3_3.text_to_svm_pecos.py \
   --config /path/to/config.json --reuse-tfidf
 ```
 
@@ -239,8 +241,8 @@ DEXML preparation has two stages.
 ### Convert text and labels
 
 ```bash
-python /nfs-stor/linh.vu/dataprep_files/2.create_svm_text_to_dexml.py \
-  --config /nfs-stor/linh.vu/dataprep_files/config_amazon131k.json
+python /l/users/linh.vu/LibMultiLabel/dataprep_files/2.create_svm_text_to_dexml.py \
+  --config /l/users/linh.vu/LibMultiLabel/dataprep_files/config_amazon131k.json
 ```
 
 This creates:
@@ -270,8 +272,8 @@ files directly rather than `DATASET/zeroshot/`.
 After the first DEXML stage, run:
 
 ```bash
-python /nfs-stor/linh.vu/dataprep_files/3_2.text_to_dexml.py \
-  --config /nfs-stor/linh.vu/dataprep_files/config_amazon131k.json
+python /l/users/linh.vu/LibMultiLabel/dataprep_files/3_2.text_to_dexml.py \
+  --config /l/users/linh.vu/LibMultiLabel/dataprep_files/config_amazon131k.json
 ```
 
 This stage:
@@ -294,13 +296,13 @@ resources, dataset config, and paths are hard-coded and should be edited before
 submission:
 
 ```bash
-sbatch /nfs-stor/linh.vu/dataprep_files/run
+sbatch /l/users/linh.vu/LibMultiLabel/dataprep_files/run
 ```
 
 ## 3. Compute statistics and verify outputs
 
 ```bash
-python /nfs-stor/linh.vu/dataprep_files/4.get_data_stats.py \
+python /l/users/linh.vu/LibMultiLabel/dataprep_files/4.get_data_stats.py \
   --dataset_path /path/to/DATASET/zeroshot \
   --original_train_file /path/to/DATASET/original/trn.txt
 ```

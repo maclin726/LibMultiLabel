@@ -165,7 +165,7 @@ def load_experiment_data(train_data_path, test_data_path, label_feature_path):
     """Load and align train, test, and label-feature matrices."""
     X_train, y_train = load_svm_data(train_data_path)
     X_test, y_test = load_svm_data(test_data_path)
-    X_label, _ = load_svm_features_keep_empty(label_feature_path)
+    X_label, _ = load_svm_data(label_feature_path)
 
     num_features = max(X_train.shape[1], X_test.shape[1], X_label.shape[1])
     X_train = pad_feature_matrix(X_train, num_features)

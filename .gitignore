@@ -5,7 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
-
+/zeroshot_paper/*
 /ZSLWAN-release/*
 /data/*
 data/eurlex4k_dexml/AttentionXML/*
@@ -169,3 +169,4 @@ docs/cli/*.include
 !requirements_nn.txt
 !requirements_parameter_search.txt
 baselines/structural-contrastive-representation-learning
+zeroshot_paper/
