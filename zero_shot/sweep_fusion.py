@@ -8,6 +8,11 @@ Special configurations:
     alpha=1, beta=1  -> tree only (unseen labels get score 0)
     alpha=0, beta=0  -> TF-IDF only (all labels ranked by document similarity)
 
+The fusion rules to sweep are chosen with the strategies option (comma-separated):
+    rank_rrf     beta / k sweep, tree-only and TF-IDF-only rows (default)
+    raw          raw-score fusion: beta sweep at alpha=1, plus alpha sweep at beta=0.01
+    rank_normal  linear-rank fusion (1 - rank/L): beta sweep at alpha=1
+
 Usage:
     sweep_fusion.py --model_path=<model_path> \
     --train_instance_data_path=<train_data> \
@@ -16,7 +21,8 @@ Usage:
     --output_path=<output_json> \
     [--propensity_a=<a>] \
     [--propensity_b=<b>] \
-    [--batch_size=<n>]
+    [--batch_size=<n>] \
+    [--strategies=<list>]
 
 Options:
     --model_path=<model_path>                Path to the model file (string).
@@ -27,12 +33,12 @@ Options:
     --propensity_a=<a>                       PSP propensity parameter A [default: 0.55].
     --propensity_b=<b>                       PSP propensity parameter B [default: 1.5].
     --batch_size=<n>                         Test batch size [default: 64].
+    --strategies=<list>                      Comma-separated fusion strategies [default: rank_rrf].
 """
 
 import json
 import math
 import os
-import pickle
 import time
 
 import numpy as np
@@ -44,70 +50,55 @@ from model_predict import (
     MixedPredictor,
     binarize_labels,
     count_label_positives,
-    load_svm_data,
+    load_experiment_data,
+    load_model,
 )
 
 DEFAULT_K = 60
 DEFAULT_BETA = 0.01
 BETAS = (0.0, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 1.0)
 KS = (1, 5, 10, 20, 30, 60, 100, 200, 500, 1000)
+ABLATION_BETAS = (0.0, 0.001, 0.005, 0.01, 0.05, 0.1)
+RAW_ALPHAS = (0.5, 0.9)
 
 
-class NumpyCompatUnpickler(pickle.Unpickler):
-    """Load models pickled under numpy 2.x (numpy._core) with numpy 1.x (numpy.core)."""
-
-    def find_class(self, module, name):
-        try:
-            return super().find_class(module, name)
-        except ModuleNotFoundError:
-            if not module.startswith("numpy._core"):
-                raise
-            return super().find_class("numpy.core" + module[len("numpy._core") :], name)
+# model_predict now handles numpy-2 pickles and mismatched feature widths itself.
+WidthSafePredictor = MixedPredictor
+load_data_any_width = load_experiment_data
 
 
-def load_model(model_path):
-    with open(model_path, "rb") as model_file:
-        return NumpyCompatUnpickler(model_file).load()["model"]
-
-
-class WidthSafePredictor(MixedPredictor):
-    """MixedPredictor that feeds the tree only the feature columns it was trained on.
-
-    Test/label files may contain feature indices beyond the training vocabulary;
-    those columns carry no tree weights but still count for TF-IDF similarity.
-    """
-
-    def predict_values_on_seen_label(self, x):
-        num_model_features = self.supervised_model.flat_model.weights.shape[0]
-        return self.supervised_model.predict_values(x[:, :num_model_features])
-
-
-def load_data_any_width(model, train_path, test_path, label_feature_path):
-    """Like model_predict.load_experiment_data, but pads all files to a common width instead of failing."""
-    num_model_features = model.flat_model.weights.shape[0]
-    (X_train, y_train), (X_test, y_test), (X_label, _) = (
-        load_svm_data(path) for path in (train_path, test_path, label_feature_path)
-    )
-    width = max(num_model_features, X_train.shape[1], X_test.shape[1], X_label.shape[1])
-    X_train, X_test, X_label = (X.tocsr().copy() for X in (X_train, X_test, X_label))
-    for X in (X_train, X_test, X_label):
-        X.resize((X.shape[0], width))
-    return X_train, y_train, X_test, y_test, X_label
-
-
-def build_configs():
-    """Return the (name, alpha, beta, k) configurations to evaluate."""
-    configs = [("beta", 1.0, beta, DEFAULT_K) for beta in BETAS]
-    configs += [("k", 1.0, DEFAULT_BETA, k) for k in KS if k != DEFAULT_K]
-    configs.append(("tfidf_only", 0.0, 0.0, DEFAULT_K))
+def build_configs(strategies):
+    """Return the (strategy, name, alpha, beta, k) configurations to evaluate."""
+    configs = []
+    for strategy in strategies:
+        if strategy == "rank_rrf":
+            configs += [(strategy, "beta", 1.0, beta, DEFAULT_K) for beta in BETAS]
+            configs += [(strategy, "k", 1.0, DEFAULT_BETA, k) for k in KS if k != DEFAULT_K]
+            configs.append((strategy, "tfidf_only", 0.0, 0.0, DEFAULT_K))
+        elif strategy in ("raw", "rank_normal"):
+            configs += [(strategy, "beta", 1.0, beta, DEFAULT_K) for beta in ABLATION_BETAS]
+            if strategy == "raw":
+                configs += [(strategy, "alpha", alpha, DEFAULT_BETA, DEFAULT_K) for alpha in RAW_ALPHAS]
+        else:
+            raise ValueError(f"Unknown strategy: {strategy}")
     return configs
 
 
-def fuse(s_hat_ranks, doc_ranks, seen_mask, alpha, beta, k):
-    """Zero-proxy reciprocal rank fusion, identical to MixedPredictor with strategy=rank_rrf."""
+def fuse(strategy, s_hat_full, doc_sim_full, s_hat_ranks, doc_ranks, seen_mask, alpha, beta, k):
+    """Zero-proxy fusion, identical to MixedPredictor._combine_scores for the same strategy."""
     scores = np.empty(s_hat_ranks.shape)
-    scores[:, seen_mask] = alpha / (s_hat_ranks[:, seen_mask] + k) + (1 - alpha) / (doc_ranks[:, seen_mask] + k)
-    scores[:, ~seen_mask] = (1 - beta) / (doc_ranks[:, ~seen_mask] + k)
+    if strategy == "rank_rrf":
+        seen_part = alpha / (s_hat_ranks + k) + (1 - alpha) / (doc_ranks + k)
+        unseen_part = (1 - beta) / (doc_ranks + k)
+    elif strategy == "rank_normal":
+        num_labels = s_hat_ranks.shape[1]
+        seen_part = alpha * (1.0 - s_hat_ranks / num_labels) + (1 - alpha) * (1.0 - doc_ranks / num_labels)
+        unseen_part = (1 - beta) * (1.0 - doc_ranks / num_labels)
+    else:  # raw
+        seen_part = alpha * s_hat_full + (1 - alpha) * doc_sim_full
+        unseen_part = (1 - beta) * doc_sim_full
+    scores[:, seen_mask] = seen_part[:, seen_mask]
+    scores[:, ~seen_mask] = unseen_part[:, ~seen_mask]
     return scores
 
 
@@ -116,6 +107,7 @@ def main():
     propensity_a = float(args["--propensity_a"])
     propensity_b = float(args["--propensity_b"])
     batch_size = int(args["--batch_size"])
+    strategies = args["--strategies"].split(",")
 
     model = load_model(args["--model_path"])
     X_train, y_train, X_test, y_test, X_label = load_data_any_width(
@@ -136,7 +128,7 @@ def main():
 
     predictor = WidthSafePredictor(all_labels, seen_labels, model, X_label, "rank_rrf")
 
-    configs = build_configs()
+    configs = build_configs(strategies)
     metrics = [
         linear.get_metrics(
             METRIC_LIST,
@@ -162,17 +154,20 @@ def main():
         doc_ranks = predictor.ranks_of(doc_sim_full)
         targets = y_test[batch].toarray()
 
-        for (_, alpha, beta, k), metric in zip(configs, metrics):
-            metric.update(fuse(s_hat_ranks, doc_ranks, predictor.seen_mask, alpha, beta, k), targets)
+        for (strategy, _, alpha, beta, k), metric in zip(configs, metrics):
+            scores = fuse(strategy, s_hat_full, doc_sim_full, s_hat_ranks, doc_ranks, predictor.seen_mask, alpha, beta, k)
+            metric.update(scores, targets)
 
         if batch_num % 100 == 0:
             print(f"batch {batch_num + 1}/{num_batches}, {time.perf_counter() - start_time:.0f}s", flush=True)
 
     results = []
-    for (name, alpha, beta, k), metric in zip(configs, metrics):
+    for (strategy, name, alpha, beta, k), metric in zip(configs, metrics):
         values = metric.compute()
-        results.append({"sweep": name, "alpha": alpha, "beta": beta, "k": k, **{m: values[m] for m in METRIC_LIST}})
-        print(linear.tabulate_metrics(values, f"{name}: alpha={alpha} beta={beta} k={k}"), flush=True)
+        results.append(
+            {"strategy": strategy, "sweep": name, "alpha": alpha, "beta": beta, "k": k, **{m: values[m] for m in METRIC_LIST}}
+        )
+        print(linear.tabulate_metrics(values, f"{strategy} {name}: alpha={alpha} beta={beta} k={k}"), flush=True)
 
     os.makedirs(os.path.dirname(args["--output_path"]), exist_ok=True)
     with open(args["--output_path"], "w") as output_file:

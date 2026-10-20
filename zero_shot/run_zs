@@ -18,7 +18,9 @@
 #     sweep    fusion sweep over beta / k (sweep_fusion.py)
 #     timing   train + inference timing and peak memory (time_pipeline.py)
 #   dataset:  eurlex4k | eurlex57k | amazoncat13k | amazontitles131k | amazon131k
-#   strategy: predict mode only: rank_rrf (default) | raw | rank_normal
+#   strategy: predict mode: rank_rrf (default) | raw | rank_normal
+#             sweep mode: comma-separated list of the same, e.g. raw,rank_normal
+#             (non-default sweeps write sweep/<dataset>_<strategies>.json)
 # Override resources on the command line, e.g. sbatch --mem=200G for amazon131k train.
 
 set -euo pipefail
@@ -68,12 +70,19 @@ case "$DATASET" in
         exit 1 ;;
 esac
 
-case "$STRATEGY" in
-    raw | rank_rrf | rank_normal) ;;
-    *)
-        echo "Invalid strategy: $STRATEGY" >&2
-        exit 1 ;;
-esac
+IFS=',' read -ra strategy_list <<< "$STRATEGY"
+if [[ "$MODE" != sweep && ${#strategy_list[@]} -ne 1 ]]; then
+    echo "Only sweep mode accepts several strategies: $STRATEGY" >&2
+    exit 1
+fi
+for strategy in "${strategy_list[@]}"; do
+    case "$strategy" in
+        raw | rank_rrf | rank_normal) ;;
+        *)
+            echo "Invalid strategy: $strategy" >&2
+            exit 1 ;;
+    esac
+done
 
 required_files=("$TRAIN" "$TEST")
 case "$MODE" in
@@ -135,12 +144,16 @@ case "$MODE" in
             --propensity_b "$PROPENSITY_B" ;;
     sweep)
         cd "${PROJECT_ROOT}/zero_shot"
+        sweep_name="$DATASET"
+        [[ "$STRATEGY" != rank_rrf ]] && sweep_name="${DATASET}_${STRATEGY//,/_}"
+        echo "Strategies: $STRATEGY"
         "$PYTHON" sweep_fusion.py \
             --model_path "$MODEL_PATH" \
             --train_instance_data_path "$TRAIN" \
             --test_instance_data_path "$TEST" \
             --label_feature_path "$LF" \
-            --output_path "${OUT_ROOT}/sweep/${DATASET}.json" \
+            --output_path "${OUT_ROOT}/sweep/${sweep_name}.json" \
+            --strategies "$STRATEGY" \
             --propensity_a "$PROPENSITY_A" \
             --propensity_b "$PROPENSITY_B" ;;
     timing)

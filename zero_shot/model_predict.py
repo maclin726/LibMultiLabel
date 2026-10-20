@@ -185,7 +185,8 @@ class MixedPredictor:
         return neighbors.kneighbors(self.label_feature, return_distance=False)
 
     def predict_values_on_seen_label(self, x):
-        return self.supervised_model.predict_values(x)
+        # Columns beyond the training vocabulary have no tree weights; they only count for TF-IDF.
+        return self.supervised_model.predict_values(x[:, : num_model_features(self.supervised_model)])
 
     def predict_values_on_unseen_label(self, x):
         return predict_values_by_tfidf(x, self.unseen_label_feature)
@@ -381,34 +382,41 @@ def print_arguments(args):
     print(f"Prediction cache: {'enabled' if args['--save_prediction_cache'] else 'disabled'}")
 
 
+class NumpyCompatUnpickler(pickle.Unpickler):
+    """Load models pickled under numpy 2.x (numpy._core) with numpy 1.x (numpy.core)."""
+
+    def find_class(self, module, name):
+        try:
+            return super().find_class(module, name)
+        except ModuleNotFoundError:
+            if not module.startswith("numpy._core"):
+                raise
+            return super().find_class("numpy.core" + module[len("numpy._core") :], name)
+
+
+def num_model_features(model):
+    return model.weights.shape[0] if model.name == "1vsrest" else model.flat_model.weights.shape[0]
+
+
 def load_model(model_path):
     """Load the trained linear model and report its load time."""
     start_time = time.time()
     with open(model_path, "rb") as model_file:
         print(model_path)
-        model = pickle.load(model_file)["model"]
+        model = NumpyCompatUnpickler(model_file).load()["model"]
     print(f"Model loaded in {time.time() - start_time:.2f} seconds.")
     return model
 
 
 def load_experiment_data(model, train_data_path, test_data_path, label_feature_path):
-    """Load train/test instances and label features."""
-    if model.name == "1vsrest":
-        num_model_features = model.weights.shape[0]
-    else:
-        print("Tree model")
-        num_model_features = model.flat_model.weights.shape[0]
-
-    X_train, y_train = load_svm_data(
-        train_data_path, n_features=num_model_features
+    """Load train/test instances and label features, padded to a common feature width."""
+    (X_train, y_train), (X_test, y_test), (X_label, _) = (
+        load_svm_data(path) for path in (train_data_path, test_data_path, label_feature_path)
     )
-    X_test, y_test = load_svm_data(
-        test_data_path, n_features=num_model_features
-    )
-    X_label, _ = load_svm_data( # load_svm_features_keep_empty possibly change to this
-        label_feature_path, n_features=num_model_features
-    )
-    
+    width = max(num_model_features(model), X_train.shape[1], X_test.shape[1], X_label.shape[1])
+    X_train, X_test, X_label = (X.tocsr().copy() for X in (X_train, X_test, X_label))
+    for X in (X_train, X_test, X_label):
+        X.resize((X.shape[0], width))
     return X_train, y_train, X_test, y_test, X_label
 
 

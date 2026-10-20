@@ -6,6 +6,8 @@ Writes into the paper directory:
     gen-k-sweep.tex       k-sweep table
     gen-tree-only.tex     tree-only / TF-IDF-only / fused rows for each dataset
     gen-runtime.tex       CPU training/inference time and peak memory
+    gen-strategies.tex    raw-score / linear-rank fusion rows for each dataset (from model_predict.py logs)
+    gen-strategy-sweep.tex  beta (and raw alpha) sweep for RRF, raw-score and linear-rank fusion
 """
 
 import json
@@ -13,6 +15,7 @@ import os
 import sys
 
 ROOT = "/nfs-stor/linh.vu/runs/rebuttal"
+PREDICT_LOGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 PAPER = sys.argv[1] if len(sys.argv) > 1 else "/l/users/linh.vu/LibMultiLabel/zeroshot_paper"
 DATASETS = [
     ("eurlex4k", "EURLEX4K"),
@@ -127,6 +130,69 @@ def tree_only_rows():
     return "\n".join(lines) + "\n"
 
 
+def strategy_rows():
+    """Rows for the fusion-strategy ablation: same alpha=1, beta=0.01, zero proxy as OURS."""
+    lines = ["% Fusion-strategy rows to paste under OURS (same column order: PSP@1-5, P@1-5, N@1-5, Z@10-100)."]
+    order = ["PSP@1", "PSP@3", "PSP@5", "P@1", "P@3", "P@5", "NDCG@1", "NDCG@3", "NDCG@5", "ZSR@10", "ZSR@50", "ZSR@100"]
+    for name, title in DATASETS:
+        lines.append(f"% {title}")
+        for label, strategy in [("Raw-score fusion", "raw"), ("Linear-rank fusion", "rank_normal")]:
+            path = os.path.join(PREDICT_LOGS, f"logs_zero_{name}_zs_{strategy}_updatedPSP.json")
+            if not os.path.exists(path):
+                lines.append(f"% {label}: missing {os.path.basename(path)}")
+                continue
+            row = json.load(open(path))["full_metrics"][0]
+            lines.append(" & ".join([label] + [pct(row[m]) for m in order]) + r" \\")
+    return "\n".join(lines) + "\n"
+
+
+def strategy_sweep_table():
+    """P@1 / P@5 / ZSR@100 against beta for each fusion strategy; RRF rows come from the main sweep."""
+    rrf = {name: load("sweep", name) for name, _ in DATASETS}
+    ablation = {name: load("sweep", f"{name}_raw_rank_normal") for name, _ in DATASETS}
+    present = [(name, title) for name, title in DATASETS if rrf[name] or ablation[name]]
+    metrics = ["P@1", "P@5", "ZSR@100"]
+    blocks = [
+        ("Reciprocal-rank (OURS)", "rank_rrf", "beta", [0.0, 0.001, 0.005, 0.01, 0.05, 0.1]),
+        ("Raw-score", "raw", "beta", [0.0, 0.001, 0.005, 0.01, 0.05, 0.1]),
+        ("Raw-score", "raw", "alpha", [0.5, 0.9]),
+        ("Linear-rank", "rank_normal", "beta", [0.0, 0.001, 0.005, 0.01, 0.05, 0.1]),
+    ]
+    lines = [
+        r"\begin{table*}[ht]",
+        r"\centering",
+        r"\caption{Fusion strategies under the same sweep (zero proxy, $k=60$ for reciprocal rank). "
+        r"Raw-score fusion adds the sigmoid tree score and the TF-IDF similarity directly; linear-rank fusion "
+        r"replaces each score by $1-r/L$. Rows vary $\beta$ at $\alpha=1$, except the raw-score $\alpha$ rows "
+        r"($\beta=0.01$), which also mix TF-IDF into seen-label scores.}",
+        r"\label{tab:strategy_sweep}",
+        r"\resizebox{\textwidth}{!}{%",
+        r"\begin{tabular}{ll|" + "|".join(["ccc"] * len(present)) + "}",
+        r"\toprule",
+        " & ".join(["", ""] + [rf"\multicolumn{{3}}{{c{'|' if i < len(present) - 1 else ''}}}{{{title}}}" for i, (_, title) in enumerate(present)]) + r" \\",
+        " & ".join(["Fusion", "Setting"] + ["P@1", "P@5", "Z@100"] * len(present)) + r" \\",
+    ]
+    previous = None
+    for label, strategy, param, values in blocks:
+        for value in values:
+            cells = []
+            for name, _ in present:
+                if strategy == "rank_rrf":
+                    row = find(rrf[name]["results"], "beta", alpha=1.0, beta=value, k=60) if rrf[name] else None
+                else:
+                    row = find(ablation[name]["results"], param, strategy=strategy, **{param: value}) if ablation[name] else None
+                cells += [pct(row[m]) if row else "--" for m in metrics]
+            if all(cell == "--" for cell in cells):
+                continue
+            if label != previous:
+                lines.append(r"\midrule")
+            setting = rf"$\{param}={value:g}$"
+            lines.append(" & ".join([label if label != previous else "", setting] + cells) + r" \\")
+            previous = label
+    lines += [r"\bottomrule", r"\end{tabular}", "}", r"\end{table*}", ""]
+    return "\n".join(lines)
+
+
 def runtime_table():
     lines = [
         r"\begin{table}[t]",
@@ -167,6 +233,8 @@ def main():
         ),
         "gen-tree-only.tex": tree_only_rows(),
         "gen-runtime.tex": runtime_table(),
+        "gen-strategies.tex": strategy_rows(),
+        "gen-strategy-sweep.tex": strategy_sweep_table(),
     }
     for filename, text in outputs.items():
         with open(os.path.join(PAPER, filename), "w") as output_file:
