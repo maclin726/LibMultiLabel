@@ -161,7 +161,7 @@ def strategy_sweep_table():
     lines = [
         r"\begin{table*}[ht]",
         r"\centering",
-        r"\caption{Fusion strategies under the same sweep (zero proxy, $k=60$ for reciprocal rank). "
+        r"\caption{Fusion strategies under the same sweep ($k=60$ for reciprocal rank). "
         r"Raw-score fusion adds the sigmoid tree score and the TF-IDF similarity directly; linear-rank fusion "
         r"replaces each score by $1-r/L$. Rows vary $\beta$ at $\alpha=1$, except the raw-score $\alpha$ rows "
         r"($\beta=0.01$), which also mix TF-IDF into seen-label scores.}",
@@ -198,7 +198,7 @@ def runtime_table():
         r"\begin{table}[t]",
         r"\centering",
         r"\caption{CPU cost of our method. Training is a single LibMultiLabel tree; inference covers tree scoring, "
-        r"TF-IDF similarity to all labels, and rank fusion over the full label space (metric computation excluded). "
+        r"TF-IDF similarity to all labels, and rank fusion over all labels (metric computation excluded). "
         r"All runs use 32 cores of a node with two AMD EPYC 7742 processors.}",
         r"\label{tab:runtime}",
         r"\resizebox{\columnwidth}{!}{%",

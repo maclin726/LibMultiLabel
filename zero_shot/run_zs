@@ -10,13 +10,15 @@
 
 # Single launcher for every zero-shot experiment.
 # Usage: sbatch -J <name> run_zs <mode> <dataset> [strategy]
-#   mode:     train | eval | predict | tfidf | sweep | timing
+#   mode:     train | eval | predict | tfidf | sweep | timing | bm25 | error
 #     train    train the tree model with main.py (writes to /nfs-stor/linh.vu/runs)
 #     eval     evaluate the trained tree on seen labels with main.py --eval
 #     predict  zero-shot prediction with model_predict.py (writes zero_shot/logs)
 #     tfidf    TF-IDF-only baseline with model_tfidf_predict.py
 #     sweep    fusion sweep over beta / k (sweep_fusion.py)
 #     timing   train + inference timing and peak memory (time_pipeline.py)
+#     bm25     BM25 instead of TF-IDF as the lexical scorer (bm25_fusion.py)
+#     error    error analysis of unseen-label retrieval (error_analysis.py)
 #   dataset:  eurlex4k | eurlex57k | amazoncat13k | amazontitles131k | amazon131k
 #   strategy: predict mode: rank_rrf (default) | raw | rank_normal
 #             sweep mode: comma-separated list of the same, e.g. raw,rank_normal
@@ -32,43 +34,57 @@ readonly PROJECT_ROOT="/l/users/linh.vu/LibMultiLabel"
 readonly PYTHON="/home/linh.vu/.conda/envs/zeroshot/bin/python"
 readonly NFS="/nfs-stor/linh.vu"
 readonly OUT_ROOT="${NFS}/runs/rebuttal"
+# bm25 and error modes run the scripts in the NFS checkout.
+readonly CODE_ROOT="${NFS}/code_files/LibMultiLabel"
 
+DESC_ARGS=()
 case "$DATASET" in
     eurlex4k)
         MODEL_PATH="${NFS}/runs/eurlex4k_zs_pecos_tree_20260903133623/linear_pipeline.pickle"
         TRAIN="${NFS}/EURLEX-4K/zeroshot/eurlex4k_tfidf_train_ext_pecos.svm"
         TEST="${NFS}/EURLEX-4K/zeroshot/eurlex4k_tfidf_test_ext_pecos.svm"
         LF="${NFS}/EURLEX-4K/zeroshot/eurlex4k_tfidf_lf_pecos.svm"
-        PROPENSITY_A=0.55; PROPENSITY_B=1.5 ;;
+        PROPENSITY_A=0.55; PROPENSITY_B=1.5
+        TEXT_DIR="${NFS}/EURLEX-4K/zeroshot"; LABEL_MAPPING="${NFS}/EURLEX-4K/zeroshot/label_mapping.txt" ;;
     eurlex57k)
         MODEL_PATH="${NFS}/runs/eurlex57k_zs_pecos_tree_20260917171538/linear_pipeline.pickle"
         TRAIN="${NFS}/EURLEX-57K/zeroshot/eurlex57k_tfidf_train_ext.svm"
         TEST="${NFS}/EURLEX-57K/zeroshot/eurlex57k_tfidf_test_ext.svm"
         LF="${NFS}/EURLEX-57K/zeroshot/eurlex57k_tfidf_lf.svm"
-        PROPENSITY_A=0.55; PROPENSITY_B=1.5 ;;
+        PROPENSITY_A=0.55; PROPENSITY_B=1.5
+        TEXT_DIR="${NFS}/EURLEX-57K/zeroshot"
+        # Labels in zeroshot/ are not line numbers of Y.txt, so use the descriptions already in label order
+        # and the string-sorted label set that orders the label features.
+        LABEL_MAPPING="${OUT_ROOT}/eurlex57k_label_mapping.txt"
+        LABEL_DESC="${NFS}/EURLEX-57K/eurlex57k_tfidf_label_desc_pecos.txt"; DESC_ARGS=(--ordered_descriptions) ;;
     amazoncat13k)
         # No earlier tree run is kept, so the sweep uses the model saved by the timing job.
         MODEL_PATH="${OUT_ROOT}/timing/amazoncat13k/linear_pipeline.pickle"
         TRAIN="${NFS}/AmazonCat-13K/zeroshot/AmazonCat-13K_tfidf_train.svm"
         TEST="${NFS}/AmazonCat-13K/zeroshot/AmazonCat-13K_tfidf_test.svm"
         LF="${NFS}/AmazonCat-13K/zeroshot/AmazonCat-13K_tfidf_lf.svm"
-        PROPENSITY_A=0.6; PROPENSITY_B=2.6 ;;
+        PROPENSITY_A=0.6; PROPENSITY_B=2.6
+        TEXT_DIR="${NFS}/AmazonCat-13K/zeroshot"; LABEL_MAPPING="${NFS}/AmazonCat-13K/zeroshot/label_mapping.txt" ;;
     amazontitles131k)
         MODEL_PATH="${NFS}/runs/amazontitles131k_zs_tree_20260831133149/linear_pipeline.pickle"
         TRAIN="${NFS}/LF-AmazonTitle-131K-ZS/zeroshot/LF-AmazonTitles-131K_tfidf_train.svm"
         TEST="${NFS}/LF-AmazonTitle-131K-ZS/zeroshot/LF-AmazonTitles-131K_tfidf_test.svm"
         LF="${NFS}/LF-AmazonTitle-131K-ZS/zeroshot/LF-AmazonTitles-131K_tfidf_lf.svm"
-        PROPENSITY_A=0.6; PROPENSITY_B=2.6 ;;
+        PROPENSITY_A=0.6; PROPENSITY_B=2.6
+        TEXT_DIR="${NFS}/LF-AmazonTitle-131K-ZS/zeroshot"; LABEL_MAPPING="${NFS}/LF-AmazonTitle-131K-ZS/zeroshot/label_mapping.txt" ;;
     amazon131k)
         MODEL_PATH="${NFS}/runs/amazon131k_zs_tree_20260923002902/linear_pipeline.pickle"
         TRAIN="${NFS}/LF-Amazon-131K-ZS/zeroshot/LF-Amazon-131K-ZS_tfidf_train.svm"
         TEST="${NFS}/LF-Amazon-131K-ZS/zeroshot/LF-Amazon-131K-ZS_tfidf_test.svm"
         LF="${NFS}/LF-Amazon-131K-ZS/zeroshot/LF-Amazon-131K-ZS_tfidf_lf.svm"
-        PROPENSITY_A=0.6; PROPENSITY_B=2.6 ;;
+        PROPENSITY_A=0.6; PROPENSITY_B=2.6
+        TEXT_DIR="${NFS}/LF-Amazon-131K-ZS/zeroshot"; LABEL_MAPPING="${NFS}/LF-Amazon-131K-ZS/zeroshot/label_mapping.txt" ;;
     *)
         echo "Unknown dataset: $DATASET" >&2
         exit 1 ;;
 esac
+
+LABEL_DESC="${LABEL_DESC:-${TEXT_DIR}/Y.txt}"
 
 IFS=',' read -ra strategy_list <<< "$STRATEGY"
 if [[ "$MODE" != sweep && ${#strategy_list[@]} -ne 1 ]]; then
@@ -89,6 +105,8 @@ case "$MODE" in
     eval) required_files+=("$MODEL_PATH") ;;
     predict | sweep) required_files+=("$MODEL_PATH" "$LF") ;;
     tfidf | timing) required_files+=("$LF") ;;
+    bm25) required_files+=("$MODEL_PATH" "$LF" "${TEXT_DIR}/tst.txt" "$LABEL_DESC" "$LABEL_MAPPING") ;;
+    error) required_files+=("$MODEL_PATH" "$LF" "${TEXT_DIR}/trn.txt" "${TEXT_DIR}/tst.txt" "$LABEL_DESC" "$LABEL_MAPPING") ;;
 esac
 for input_file in "${required_files[@]}"; do
     if [[ ! -f "$input_file" ]]; then
@@ -99,7 +117,11 @@ done
 
 hostname
 echo "Mode: $MODE, dataset: $DATASET"
-export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/zero_shot"
+if [[ "$MODE" == bm25 || "$MODE" == error ]]; then
+    export PYTHONPATH="${CODE_ROOT}:${CODE_ROOT}/zero_shot"
+else
+    export PYTHONPATH="${PROJECT_ROOT}:${PROJECT_ROOT}/zero_shot"
+fi
 
 case "$MODE" in
     train)
@@ -163,6 +185,33 @@ case "$MODE" in
             --test_file "$TEST" \
             --label_feature_path "$LF" \
             --output_dir "${OUT_ROOT}/timing/${DATASET}" ;;
+    bm25)
+        cd "${CODE_ROOT}/zero_shot"
+        "$PYTHON" bm25_fusion.py \
+            --model_path "$MODEL_PATH" \
+            --train_instance_data_path "$TRAIN" \
+            --test_instance_data_path "$TEST" \
+            --label_feature_path "$LF" \
+            --test_text_path "${TEXT_DIR}/tst.txt" \
+            --label_description_path "$LABEL_DESC" \
+            --label_mapping_path "$LABEL_MAPPING" \
+            "${DESC_ARGS[@]}" \
+            --output_path "${OUT_ROOT}/bm25/${DATASET}.json" \
+            --propensity_a "$PROPENSITY_A" \
+            --propensity_b "$PROPENSITY_B" ;;
+    error)
+        cd "${CODE_ROOT}/zero_shot"
+        "$PYTHON" error_analysis.py \
+            --model_path "$MODEL_PATH" \
+            --train_instance_data_path "$TRAIN" \
+            --test_instance_data_path "$TEST" \
+            --label_feature_path "$LF" \
+            --train_text_path "${TEXT_DIR}/trn.txt" \
+            --test_text_path "${TEXT_DIR}/tst.txt" \
+            --label_description_path "$LABEL_DESC" \
+            --label_mapping_path "$LABEL_MAPPING" \
+            "${DESC_ARGS[@]}" \
+            --output_dir "${OUT_ROOT}/error_analysis/${DATASET}" ;;
     *)
         echo "Unknown mode: $MODE" >&2
         exit 1 ;;
