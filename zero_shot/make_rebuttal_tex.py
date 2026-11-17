@@ -6,7 +6,7 @@ Writes into the paper directory:
     gen-k-sweep.tex       k-sweep table
     gen-tree-only.tex     tree-only / TF-IDF-only / fused rows for each dataset
     gen-runtime.tex       CPU training/inference time and peak memory
-    gen-strategies.tex    raw-score / linear-rank fusion rows for each dataset (from model_predict.py logs)
+    gen-strategies.tex    raw-score / linear-rank fusion rows for each dataset
     gen-strategy-sweep.tex  beta (and raw alpha) sweep for RRF, raw-score and linear-rank fusion
 """
 
@@ -15,7 +15,6 @@ import os
 import sys
 
 ROOT = "/nfs-stor/linh.vu/runs/rebuttal"
-PREDICT_LOGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 PAPER = sys.argv[1] if len(sys.argv) > 1 else "/l/users/linh.vu/LibMultiLabel/zeroshot_paper"
 DATASETS = [
     ("eurlex4k", "EURLEX4K"),
@@ -24,9 +23,13 @@ DATASETS = [
     ("amazontitles131k", "AmazonTitles-131K"),
     ("amazon131k", "Amazon-131K"),
 ]
+# The beta and k sweeps also cover Wikipedia-500K; the other tables do not.
+SWEEP_DATASETS = DATASETS + [("wikipedia500k", "Wikipedia-500K")]
+# Final setting for OURS. The k sweep was run at beta=0.01, so its k=60 row stays there.
+OURS_BETA = 0.001
 COLUMNS = ["P@1", "P@3", "P@5", "ZSR@10", "ZSR@50", "ZSR@100"]
-COLORS = ["blue", "red", "teal", "orange", "violet"]
-MARKS = ["*", "square*", "triangle*", "diamond*", "pentagon*"]
+COLORS = ["blue", "red", "teal", "orange", "violet", "black"]
+MARKS = ["*", "square*", "triangle*", "diamond*", "pentagon*", "x"]
 
 
 def load(kind, name):
@@ -46,8 +49,8 @@ def find(results, sweep, **params):
 
 
 def sweep_table(sweep, param, caption, label):
-    sweeps = {name: load("sweep", name) for name, _ in DATASETS}
-    present = [(name, title) for name, title in DATASETS if sweeps[name]]
+    sweeps = {name: load("sweep", name) for name, _ in SWEEP_DATASETS}
+    present = [(name, title) for name, title in SWEEP_DATASETS if sweeps[name]]
     metrics = ["P@1", "P@5", "ZSR@100"]
     lines = [
         r"\begin{table*}[ht]",
@@ -82,7 +85,7 @@ def beta_figure():
     panels = []
     for metric in ("ZSR@10", "ZSR@100"):
         plots = []
-        for i, (name, title) in enumerate(DATASETS):
+        for i, (name, title) in enumerate(SWEEP_DATASETS):
             sweep = load("sweep", name)
             if not sweep:
                 continue
@@ -90,7 +93,7 @@ def beta_figure():
             coords = " ".join(f"({r['beta']:g},{100 * r[metric]:.2f})" for r in rows)
             legend = rf" \addlegendentry{{{title}}}" if metric == "ZSR@100" else ""
             plots.append(rf"\addplot[color={COLORS[i]},mark={MARKS[i]},mark size=1.2pt] coordinates {{{coords}}};{legend}")
-        legend_style = r", legend style={font=\tiny,at={(0.03,0.03)},anchor=south west}" if metric == "ZSR@100" else ""
+        legend_style = r", legend columns=2, legend style={font=\tiny,at={(0.03,0.03)},anchor=south west}" if metric == "ZSR@100" else ""
         panels += [
             r"\begin{tikzpicture}",
             rf"\begin{{axis}}[width=0.5\textwidth,height=0.32\textwidth,xmode=log,xlabel={{$\beta$}},ylabel={{{metric} (\%)}},"
@@ -124,24 +127,24 @@ def tree_only_rows():
         for label, row in [
             ("TF-IDF only", find(sweep["results"], "tfidf_only")),
             ("Tree only", find(sweep["results"], "beta", beta=1.0)),
-            ("OURS", find(sweep["results"], "beta", beta=0.01, k=60)),
+            ("OURS", find(sweep["results"], "beta", beta=OURS_BETA, k=60)),
         ]:
             lines.append(" & ".join([label] + [pct(row[m]) for m in order]) + r" \\")
     return "\n".join(lines) + "\n"
 
 
 def strategy_rows():
-    """Rows for the fusion-strategy ablation: same alpha=1, beta=0.01, zero proxy as OURS."""
+    """Rows for the fusion-strategy ablation: same alpha=1, beta, zero proxy as OURS."""
     lines = ["% Fusion-strategy rows to paste under OURS (same column order: PSP@1-5, P@1-5, N@1-5, Z@10-100)."]
     order = ["PSP@1", "PSP@3", "PSP@5", "P@1", "P@3", "P@5", "NDCG@1", "NDCG@3", "NDCG@5", "ZSR@10", "ZSR@50", "ZSR@100"]
     for name, title in DATASETS:
+        ablation = load("sweep", f"{name}_raw_rank_normal")
         lines.append(f"% {title}")
         for label, strategy in [("Raw-score fusion", "raw"), ("Linear-rank fusion", "rank_normal")]:
-            path = os.path.join(PREDICT_LOGS, f"logs_zero_{name}_zs_{strategy}_updatedPSP.json")
-            if not os.path.exists(path):
-                lines.append(f"% {label}: missing {os.path.basename(path)}")
+            row = find(ablation["results"], "beta", strategy=strategy, beta=OURS_BETA) if ablation else None
+            if not row:
+                lines.append(f"% {label}: missing {name}_raw_rank_normal.json")
                 continue
-            row = json.load(open(path))["full_metrics"][0]
             lines.append(" & ".join([label] + [pct(row[m]) for m in order]) + r" \\")
     return "\n".join(lines) + "\n"
 

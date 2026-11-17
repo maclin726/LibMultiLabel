@@ -2,8 +2,7 @@
 Measure wall-clock time and peak memory of the full CPU pipeline:
 tree training, then zero-shot inference over the full label space.
 
-Inference timing excludes metric computation and the label nearest-neighbor
-search, which the zero-proxy configuration does not use.
+Inference timing excludes metric computation.
 
 Usage:
     time_pipeline.py --training_file=<train_data> \
@@ -37,13 +36,6 @@ from model_predict import RRF_K, binarize_labels
 from sweep_fusion import WidthSafePredictor, load_data_any_width, load_model
 
 TOP_K = 100
-
-
-class ZeroProxyPredictor(WidthSafePredictor):
-    """MixedPredictor without the label kNN search that only non-zero proxies need."""
-
-    def get_kneighbors(self, n_neighbors=None):
-        return None
 
 
 def peak_rss_gib():
@@ -99,7 +91,7 @@ def main():
         log("model_size_gib", os.path.getsize(model_path) / 2**30)
         del datasets
 
-    # Inference, following model_predict.py with alpha=1 and the zero proxy.
+    # Inference, following model_predict.py with alpha=1.
     start = time.perf_counter()
     X_train, y_train, X_test, y_test, X_label = load_data_any_width(
         model, args["--training_file"], args["--test_file"], args["--label_feature_path"]
@@ -107,7 +99,7 @@ def main():
     num_labels = X_label.shape[0]
     y_train, _ = binarize_labels(y_train, y_test, num_labels)
     seen_labels = np.nonzero(np.sum(y_train, axis=0)[0])[1]
-    predictor = ZeroProxyPredictor(np.arange(num_labels, dtype="int"), seen_labels, model, X_label, "rank_rrf")
+    predictor = WidthSafePredictor(np.arange(num_labels, dtype="int"), seen_labels, model, X_label, "rank_rrf")
     log("inference_setup_seconds", time.perf_counter() - start)
     log("num_test_instances", int(X_test.shape[0]))
     log("num_labels", int(num_labels))

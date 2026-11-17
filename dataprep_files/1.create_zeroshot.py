@@ -94,7 +94,7 @@ print(f"Chosen zero-shot labels: {len(zeroshot_labels)}")
 # Greedy safe filtering:
 # remove a train sample only if:
 # 1. it contains at least one zero-shot label
-# 2. removing it will NOT make any non-test label disappear entirely
+# 2. removing it will NOT make any training label disappear entirely
 filtered_train_samples = []
 current_freq = train_label_freq.copy()
 

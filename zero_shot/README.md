@@ -11,7 +11,7 @@ sbatch -J <name> run_zs <mode> <dataset> [strategy]
 |-----------|------------------------------------------------|-------------------------------------------------|
 | `train`   | `main.py` tree training                        | `/nfs-stor/linh.vu/runs/<dataset>_zs_tree_*`    |
 | `eval`    | `main.py --eval` on seen labels                | slurm log                                       |
-| `predict` | `model_predict.py` (tree + TF-IDF fusion)      | `logs/logs_{proxy}_{run_name}_updatedPSP.json`  |
+| `predict` | `model_predict.py` (tree + TF-IDF fusion)      | `logs/logs_zero_{run_name}_updatedPSP.json`    |
 | `tfidf`   | `model_tfidf_predict.py` (TF-IDF only)         | slurm log                                       |
 | `sweep`   | `sweep_fusion.py` (beta / k sweep)             | `/nfs-stor/linh.vu/runs/rebuttal/sweep/`        |
 | `timing`  | `time_pipeline.py` (runtime, peak memory)      | `/nfs-stor/linh.vu/runs/rebuttal/timing/`       |
